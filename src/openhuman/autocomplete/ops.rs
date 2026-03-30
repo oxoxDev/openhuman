@@ -106,8 +106,8 @@ pub async fn autocomplete_history(
     ))
 }
 
-pub async fn autocomplete_clear_history() -> Result<RpcOutcome<AutocompleteClearHistoryResult>, String>
-{
+pub async fn autocomplete_clear_history(
+) -> Result<RpcOutcome<AutocompleteClearHistoryResult>, String> {
     let cleared = crate::openhuman::autocomplete::history::clear_history().await?;
     Ok(RpcOutcome::single_log(
         AutocompleteClearHistoryResult { cleared },

@@ -25,11 +25,7 @@ pub struct AcceptedCompletion {
 ///
 /// Keys are zero-padded timestamps so lexicographic order == chronological order.
 /// After saving, old entries beyond `MAX_HISTORY_ENTRIES` are trimmed.
-pub async fn save_accepted_completion(
-    context: &str,
-    suggestion: &str,
-    app_name: Option<&str>,
-) {
+pub async fn save_accepted_completion(context: &str, suggestion: &str, app_name: Option<&str>) {
     let client = match MemoryClient::new_local() {
         Ok(c) => c,
         Err(e) => {
@@ -70,9 +66,7 @@ pub async fn save_accepted_completion(
             // rows is newest-first; delete from index MAX_HISTORY_ENTRIES onward (oldest).
             for row in rows.into_iter().skip(MAX_HISTORY_ENTRIES) {
                 if let Some(k) = row["key"].as_str() {
-                    let _ = client
-                        .kv_delete(Some(AUTOCOMPLETE_KV_NAMESPACE), k)
-                        .await;
+                    let _ = client.kv_delete(Some(AUTOCOMPLETE_KV_NAMESPACE), k).await;
                 }
             }
         }
@@ -142,9 +136,7 @@ pub async fn clear_history() -> Result<usize, String> {
     let count = rows.len();
     for row in &rows {
         if let Some(k) = row["key"].as_str() {
-            let _ = client
-                .kv_delete(Some(AUTOCOMPLETE_KV_NAMESPACE), k)
-                .await;
+            let _ = client.kv_delete(Some(AUTOCOMPLETE_KV_NAMESPACE), k).await;
         }
     }
     log::debug!("[autocomplete:history] cleared {count} entries");

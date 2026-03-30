@@ -7,9 +7,9 @@ import {
   isTauri,
   openhumanAutocompleteAccept,
   openhumanAutocompleteClearHistory,
-  openhumanAutocompleteHistory,
   openhumanAutocompleteCurrent,
   openhumanAutocompleteDebugFocus,
+  openhumanAutocompleteHistory,
   openhumanAutocompleteSetStyle,
   openhumanAutocompleteStart,
   openhumanAutocompleteStatus,
@@ -492,9 +492,7 @@ const AutocompletePanel = () => {
                   </div>
                   <div className="flex items-baseline gap-1 text-stone-200 truncate">
                     <span className="shrink-0 text-stone-500">…</span>
-                    <span className="truncate text-stone-400">
-                      {entry.context.slice(-40)}
-                    </span>
+                    <span className="truncate text-stone-400">{entry.context.slice(-40)}</span>
                     <span className="shrink-0 text-stone-500">→</span>
                     <span className="font-medium text-cyan-300 truncate">{entry.suggestion}</span>
                   </div>

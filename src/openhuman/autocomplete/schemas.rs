@@ -3,11 +3,11 @@ use serde_json::{Map, Value};
 
 use crate::core::all::{ControllerFuture, RegisteredController};
 use crate::core::{ControllerSchema, FieldSchema, TypeSchema};
+use crate::openhuman::autocomplete::ops::AutocompleteHistoryParams;
 use crate::openhuman::autocomplete::{
     AutocompleteAcceptParams, AutocompleteCurrentParams, AutocompleteSetStyleParams,
     AutocompleteStartParams, AutocompleteStopParams,
 };
-use crate::openhuman::autocomplete::ops::{AutocompleteHistoryParams};
 use crate::rpc::RpcOutcome;
 
 pub fn all_controller_schemas() -> Vec<ControllerSchema> {
