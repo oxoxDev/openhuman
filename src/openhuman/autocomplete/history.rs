@@ -4,12 +4,15 @@
 //! "autocomplete" namespace and fed back as dynamic style examples on the
 //! next inference cycle, giving the model in-context personalisation.
 
-use crate::openhuman::memory::MemoryClient;
+use crate::openhuman::memory::{MemoryClient, NamespaceDocumentInput};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 const AUTOCOMPLETE_KV_NAMESPACE: &str = "autocomplete";
+const AUTOCOMPLETE_DOC_NAMESPACE: &str = "autocomplete-memory";
 const MAX_HISTORY_ENTRIES: usize = 50;
+const MAX_DOC_ENTRIES: usize = 200;
 const CONTEXT_TAIL_CHARS: usize = 40;
 
 /// A single accepted completion record persisted in the KV store.
@@ -67,6 +70,89 @@ pub async fn save_accepted_completion(context: &str, suggestion: &str, app_name:
             for row in rows.into_iter().skip(MAX_HISTORY_ENTRIES) {
                 if let Some(k) = row["key"].as_str() {
                     let _ = client.kv_delete(Some(AUTOCOMPLETE_KV_NAMESPACE), k).await;
+                }
+            }
+        }
+    }
+}
+
+/// Persist an accepted completion as a local memory document (fire-and-forget safe).
+///
+/// Documents are stored in the `"autocomplete-memory"` namespace and are
+/// searchable via `query_namespace`, enabling semantic matching of past
+/// completions against the current typing context.
+pub async fn save_completion_to_local_docs(context: &str, suggestion: &str, app_name: Option<&str>) {
+    let client = match MemoryClient::new_local() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[autocomplete:history] local doc — client init failed: {e}");
+            return;
+        }
+    };
+
+    let ts_ms = Utc::now().timestamp_millis();
+    let key = format!("completion:{ts_ms:018}");
+    let app = app_name.unwrap_or("unknown");
+
+    // Build the same formatted string used by load_recent_examples so that
+    // query results are directly usable as style examples in inference.
+    let tail: String = context
+        .chars()
+        .rev()
+        .take(CONTEXT_TAIL_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let formatted = format!("[{app}] ...{tail} → {suggestion}");
+
+    let mut tags = vec!["autocomplete".to_string(), "accepted".to_string()];
+    if let Some(name) = app_name {
+        tags.push(name.to_string());
+    }
+
+    let input = NamespaceDocumentInput {
+        namespace: AUTOCOMPLETE_DOC_NAMESPACE.to_string(),
+        key,
+        title: format!("Accepted completion — {app}"),
+        content: formatted,
+        source_type: "autocomplete".to_string(),
+        priority: "low".to_string(),
+        tags,
+        metadata: json!({
+            "context": context,
+            "suggestion": suggestion,
+            "app_name": app_name,
+            "timestamp_ms": ts_ms,
+        }),
+        category: "daily".to_string(),
+        session_id: None,
+        document_id: None,
+    };
+
+    if let Err(e) = client.put_doc(input).await {
+        log::warn!("[autocomplete:history] local doc put_doc failed: {e}");
+        return;
+    }
+
+    log::debug!("[autocomplete:history] saved local doc completion ts={ts_ms}");
+
+    // Trim to MAX_DOC_ENTRIES — delete oldest documents beyond the limit.
+    if let Ok(docs) = client
+        .list_documents(Some(AUTOCOMPLETE_DOC_NAMESPACE))
+        .await
+    {
+        let items = docs
+            .get("documents")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if items.len() > MAX_DOC_ENTRIES {
+            for item in items.into_iter().skip(MAX_DOC_ENTRIES) {
+                if let Some(doc_id) = item.get("documentId").and_then(serde_json::Value::as_str) {
+                    let _ = client
+                        .delete_document(AUTOCOMPLETE_DOC_NAMESPACE, doc_id)
+                        .await;
                 }
             }
         }
