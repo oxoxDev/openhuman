@@ -60,24 +60,20 @@ async fn accepted_completions_stored_and_retrievable() {
     history::save_completion_to_local_docs("fn main() { let x =", "42;", Some("VSCode")).await;
 
     history::save_accepted_completion("def hello():", "    print('hi')", Some("PyCharm")).await;
-    history::save_completion_to_local_docs("def hello():", "    print('hi')", Some("PyCharm")).await;
+    history::save_completion_to_local_docs("def hello():", "    print('hi')", Some("PyCharm"))
+        .await;
 
-    history::save_accepted_completion(
-        "const app = express",
-        "()",
-        Some("WebStorm"),
-    )
-    .await;
-    history::save_completion_to_local_docs(
-        "const app = express",
-        "()",
-        Some("WebStorm"),
-    )
-    .await;
+    history::save_accepted_completion("const app = express", "()", Some("WebStorm")).await;
+    history::save_completion_to_local_docs("const app = express", "()", Some("WebStorm")).await;
 
     // KV history should contain all three (newest first).
     let kv_entries = history::list_history(10).await.expect("list_history");
-    assert_eq!(kv_entries.len(), 3, "expected 3 KV entries, got {}", kv_entries.len());
+    assert_eq!(
+        kv_entries.len(),
+        3,
+        "expected 3 KV entries, got {}",
+        kv_entries.len()
+    );
 
     // Recent examples should be formatted correctly.
     let recent = history::load_recent_examples(10).await;
@@ -137,10 +133,7 @@ async fn completions_improve_future_suggestions_via_merge() {
         v
     };
 
-    assert!(
-        !merged.is_empty(),
-        "merged examples should not be empty"
-    );
+    assert!(!merged.is_empty(), "merged examples should not be empty");
     assert!(
         merged.len() <= 8,
         "merged examples should be capped at 8, got {}",
@@ -148,7 +141,10 @@ async fn completions_improve_future_suggestions_via_merge() {
     );
     // Static example should be present (appended after dynamic ones).
     let has_static = merged.iter().any(|e| e.contains("[static]"));
-    assert!(has_static, "static example should be in merged set: {merged:?}");
+    assert!(
+        has_static,
+        "static example should be in merged set: {merged:?}"
+    );
 }
 
 /// Acceptance criteria 4 (partial): clear_history removes all layers.
@@ -171,15 +167,25 @@ async fn clear_history_removes_kv_and_docs() {
 
     // Clear.
     let cleared = history::clear_history().await.expect("clear_history");
-    assert!(cleared >= 3, "should have cleared at least 3 entries, got {cleared}");
+    assert!(
+        cleared >= 3,
+        "should have cleared at least 3 entries, got {cleared}"
+    );
 
     // Verify empty.
     let after = history::list_history(10).await.expect("list after clear");
-    assert!(after.is_empty(), "history should be empty after clear, got {}", after.len());
+    assert!(
+        after.is_empty(),
+        "history should be empty after clear, got {}",
+        after.len()
+    );
 
     // Semantic query should also return nothing.
     let relevant = history::query_relevant_examples("clear_test", 5).await;
-    assert!(relevant.is_empty(), "query should return empty after clear: {relevant:?}");
+    assert!(
+        relevant.is_empty(),
+        "query should return empty after clear: {relevant:?}"
+    );
 }
 
 /// Edge case: trimming keeps only MAX_HISTORY_ENTRIES (50) in KV.
