@@ -318,10 +318,8 @@ impl AutocompleteEngine {
                 let _ = engine.try_reject_via_escape().await;
                 let _ = engine.try_accept_via_tab().await;
                 if last_refresh.elapsed() >= Duration::from_millis(debounce_ms) {
-                    let refresh_result = time::timeout(
-                        Duration::from_secs(15),
-                        engine.refresh(None),
-                    ).await;
+                    let refresh_result =
+                        time::timeout(Duration::from_secs(15), engine.refresh(None)).await;
                     match refresh_result {
                         Ok(Err(err)) => {
                             let error_message = {
@@ -332,10 +330,22 @@ impl AutocompleteEngine {
                                 state.last_error.clone()
                             };
                             if let Some(error_message) = error_message {
-                                let app_lower = engine.inner.lock().await.app_name.clone()
-                                    .unwrap_or_default().to_lowercase();
+                                let app_lower = engine
+                                    .inner
+                                    .lock()
+                                    .await
+                                    .app_name
+                                    .clone()
+                                    .unwrap_or_default()
+                                    .to_lowercase();
                                 if !app_lower.contains("openhuman") {
-                                    show_overflow_badge("error", None, Some(&error_message), None, None);
+                                    show_overflow_badge(
+                                        "error",
+                                        None,
+                                        Some(&error_message),
+                                        None,
+                                        None,
+                                    );
                                 }
                             }
                         }
@@ -791,8 +801,14 @@ impl AutocompleteEngine {
                     state.last_overlay_signature = None;
                 }
                 {
-                    let app_lower = self.inner.lock().await.app_name.clone()
-                        .unwrap_or_default().to_lowercase();
+                    let app_lower = self
+                        .inner
+                        .lock()
+                        .await
+                        .app_name
+                        .clone()
+                        .unwrap_or_default()
+                        .to_lowercase();
                     if !app_lower.contains("openhuman") {
                         show_overflow_badge("accepted", Some(&cleaned), None, None, None);
                     }
@@ -845,8 +861,14 @@ impl AutocompleteEngine {
             }
         };
         if let Some(value) = rejected {
-            let app_lower = self.inner.lock().await.app_name.clone()
-                .unwrap_or_default().to_lowercase();
+            let app_lower = self
+                .inner
+                .lock()
+                .await
+                .app_name
+                .clone()
+                .unwrap_or_default()
+                .to_lowercase();
             if !app_lower.contains("openhuman") {
                 show_overflow_badge("rejected", Some(&value), None, None, None);
             }

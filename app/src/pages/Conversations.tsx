@@ -341,7 +341,10 @@ const Conversations = () => {
             ),
           };
         });
-        if (sendingTimeoutRef.current) { clearTimeout(sendingTimeoutRef.current); sendingTimeoutRef.current = null; }
+        if (sendingTimeoutRef.current) {
+          clearTimeout(sendingTimeoutRef.current);
+          sendingTimeoutRef.current = null;
+        }
 
         // Multi-bubble delivery gate: only when local model is active
         if (!isLocalModelActiveRef.current) {
@@ -391,7 +394,10 @@ const Conversations = () => {
       },
       onError: event => {
         if (event.thread_id !== selectedThreadIdRef.current) return;
-        if (sendingTimeoutRef.current) { clearTimeout(sendingTimeoutRef.current); sendingTimeoutRef.current = null; }
+        if (sendingTimeoutRef.current) {
+          clearTimeout(sendingTimeoutRef.current);
+          sendingTimeoutRef.current = null;
+        }
         setIsSending(false);
         setToolTimelineByThread(prev => {
           const existing = prev[event.thread_id] ?? [];
@@ -565,7 +571,10 @@ const Conversations = () => {
       // setIsSending(false) and setActiveThread(null) happen in the onDone/onError event handlers
     } catch (err) {
       // Chat loop errors are emitted via socket events; this catch handles emit-level failures.
-      if (sendingTimeoutRef.current) { clearTimeout(sendingTimeoutRef.current); sendingTimeoutRef.current = null; }
+      if (sendingTimeoutRef.current) {
+        clearTimeout(sendingTimeoutRef.current);
+        sendingTimeoutRef.current = null;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       setSendError(msg);
       setIsSending(false);
@@ -722,7 +731,10 @@ const Conversations = () => {
       setInputValue(prev => prev + inlineSuffix);
       setInlineSuggestionValue('');
       if (isTauri()) {
-        void openhumanAutocompleteAccept({ suggestion: inputValue + inlineSuffix, skip_apply: true }).catch(() => {
+        void openhumanAutocompleteAccept({
+          suggestion: inputValue + inlineSuffix,
+          skip_apply: true,
+        }).catch(() => {
           // Keep local UX smooth even if accept RPC fails.
         });
       }
@@ -731,12 +743,18 @@ const Conversations = () => {
 
     if (e.key === 'ArrowRight' && inlineSuffix.length > 0) {
       const textarea = e.currentTarget;
-      if (textarea.selectionStart === inputValue.length && textarea.selectionEnd === inputValue.length) {
+      if (
+        textarea.selectionStart === inputValue.length &&
+        textarea.selectionEnd === inputValue.length
+      ) {
         e.preventDefault();
         setInputValue(prev => prev + inlineSuffix);
         setInlineSuggestionValue('');
         if (isTauri()) {
-          void openhumanAutocompleteAccept({ suggestion: inputValue + inlineSuffix, skip_apply: true }).catch(() => {});
+          void openhumanAutocompleteAccept({
+            suggestion: inputValue + inlineSuffix,
+            skip_apply: true,
+          }).catch(() => {});
         }
         return;
       }
