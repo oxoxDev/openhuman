@@ -42,6 +42,43 @@ pub fn has_staged_update(target_bin: &Path) -> bool {
 
 pub fn apply_staged_update_for_path(target_bin: &Path) -> Result<bool, String> {
     let staged = staged_binary_path(target_bin);
+    let backup = backup_binary_path(target_bin);
+
+    // Recovery: if a previous swap was interrupted (target missing, backup exists, no staged),
+    // restore from backup so the binary is usable again.
+    if !target_bin.exists() && !staged.exists() && backup.exists() {
+        log::warn!(
+            "[update] detected interrupted swap: restoring backup {} -> {}",
+            backup.display(),
+            target_bin.display()
+        );
+        std::fs::rename(&backup, target_bin).map_err(|e| {
+            format!(
+                "failed to restore backup after interrupted swap ({} -> {}): {e}",
+                backup.display(),
+                target_bin.display()
+            )
+        })?;
+        return Ok(false);
+    }
+
+    // Recovery: if a previous swap was interrupted (target missing, both staged and backup exist),
+    // activate the staged binary and clean up backup.
+    if !target_bin.exists() && staged.exists() && backup.exists() {
+        log::warn!(
+            "[update] detected interrupted swap with staged binary present, activating staged"
+        );
+        std::fs::rename(&staged, target_bin).map_err(|e| {
+            format!(
+                "failed to activate staged binary during recovery ({} -> {}): {e}",
+                staged.display(),
+                target_bin.display()
+            )
+        })?;
+        let _ = std::fs::remove_file(&backup);
+        return Ok(true);
+    }
+
     if !staged.exists() {
         return Ok(false);
     }
@@ -52,7 +89,6 @@ pub fn apply_staged_update_for_path(target_bin: &Path) -> Result<bool, String> {
         target_bin.display()
     );
 
-    let backup = backup_binary_path(target_bin);
     if backup.exists() {
         let _ = std::fs::remove_file(&backup);
     }
@@ -136,6 +172,40 @@ pub fn write_staged_binary(target_bin: &Path, bytes: &[u8]) -> Result<PathBuf, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_swap_restores_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("openhuman-core");
+        // Simulate interrupted state: target missing, only backup exists
+        let backup = with_suffix(&bin, ".bak");
+        std::fs::write(&backup, b"backup-content").expect("write backup");
+
+        let applied = apply_staged_update_for_path(&bin).expect("recover from interrupted swap");
+        assert!(!applied); // recovery, not a new update
+        assert_eq!(
+            std::fs::read(&bin).expect("read restored"),
+            b"backup-content"
+        );
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn interrupted_swap_with_staged_activates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("openhuman-core");
+        // Simulate interrupted state: target missing, both staged and backup exist
+        let backup = with_suffix(&bin, ".bak");
+        let staged = staged_binary_path(&bin);
+        std::fs::write(&backup, b"old").expect("write backup");
+        std::fs::write(&staged, b"new-staged").expect("write staged");
+
+        let applied = apply_staged_update_for_path(&bin).expect("recover with staged");
+        assert!(applied);
+        assert_eq!(std::fs::read(&bin).expect("read activated"), b"new-staged");
+        assert!(!staged.exists());
+        assert!(!backup.exists());
+    }
 
     #[test]
     fn staged_swap_roundtrip() {
