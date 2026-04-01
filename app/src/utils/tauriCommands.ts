@@ -1029,7 +1029,6 @@ export interface CoreUpdateApplyStatus {
   release_url: string;
 }
 
-
 export async function openhumanGetConfig(): Promise<CommandResponse<ConfigSnapshot>> {
   if (!isTauri()) {
     throw new Error('Not running in Tauri');
@@ -1063,9 +1062,7 @@ export async function openhumanUpdateCheck(): Promise<CommandResponse<CoreUpdate
   if (!isTauri()) {
     throw new Error('Not running in Tauri');
   }
-  return await callCoreRpc<CommandResponse<CoreUpdateStatus>>({
-    method: 'openhuman.update_check',
-  });
+  return await callCoreRpc<CommandResponse<CoreUpdateStatus>>({ method: 'openhuman.update_check' });
 }
 
 export async function openhumanUpdateApply(): Promise<CommandResponse<CoreUpdateApplyStatus>> {

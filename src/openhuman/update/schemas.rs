@@ -96,7 +96,8 @@ pub fn schemas(function: &str) -> ControllerSchema {
         "dismiss" => ControllerSchema {
             namespace: "update",
             function: "dismiss",
-            description: "Dismiss an available update version so prompt mode stops prompting for it.",
+            description:
+                "Dismiss an available update version so prompt mode stops prompting for it.",
             inputs: vec![FieldSchema {
                 name: "version",
                 ty: TypeSchema::String,

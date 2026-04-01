@@ -75,7 +75,10 @@ pub fn apply_staged_update_for_path(target_bin: &Path) -> Result<bool, String> {
     }
 
     let _ = std::fs::remove_file(&backup);
-    log::debug!("[update] staged update activated at {}", target_bin.display());
+    log::debug!(
+        "[update] staged update activated at {}",
+        target_bin.display()
+    );
     Ok(true)
 }
 

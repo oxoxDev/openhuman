@@ -79,7 +79,10 @@ fn verify_digest(bytes: &[u8], expected_sha256: Option<&str>) -> Result<(), Stri
 
 pub fn apply_staged_update_preflight() -> Result<bool, String> {
     let target = managed_binary_path()?;
-    log::debug!("[update] preflight: checking for staged update at {}", target.display());
+    log::debug!(
+        "[update] preflight: checking for staged update at {}",
+        target.display()
+    );
     match super::store::apply_staged_update_for_path(&target) {
         Ok(true) => {
             log::info!("[update] preflight: staged update applied successfully");
@@ -163,10 +166,22 @@ pub async fn update_status() -> Result<RpcOutcome<UpdateCheckStatus>, String> {
             Some(UpdateAsset {
                 version,
                 tag: config.update.last_seen_tag.clone().unwrap_or_default(),
-                name: config.update.last_seen_asset_name.clone().unwrap_or_default(),
-                download_url: config.update.last_seen_download_url.clone().unwrap_or_default(),
+                name: config
+                    .update
+                    .last_seen_asset_name
+                    .clone()
+                    .unwrap_or_default(),
+                download_url: config
+                    .update
+                    .last_seen_download_url
+                    .clone()
+                    .unwrap_or_default(),
                 digest_sha256: config.update.last_seen_digest_sha256.clone(),
-                release_url: config.update.last_seen_release_url.clone().unwrap_or_default(),
+                release_url: config
+                    .update
+                    .last_seen_release_url
+                    .clone()
+                    .unwrap_or_default(),
             })
         } else {
             None
