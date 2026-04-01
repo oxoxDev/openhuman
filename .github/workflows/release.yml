@@ -138,6 +138,9 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=v${nextVersion}\n`);
           NODE
 
+      - name: Refresh Cargo.lock after version bump
+        run: cargo generate-lockfile
+
       - name: Ensure tag does not already exist
         env:
           TAG: ${{ steps.bump.outputs.tag }}
@@ -158,7 +161,7 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
           TAG: ${{ steps.bump.outputs.tag }}
         run: |
-          git add app/package.json app/src-tauri/tauri.conf.json app/src-tauri/Cargo.toml Cargo.toml
+          git add app/package.json app/src-tauri/tauri.conf.json app/src-tauri/Cargo.toml Cargo.toml Cargo.lock
           git commit -m "chore(release): v${VERSION}"
           git push origin main
 
