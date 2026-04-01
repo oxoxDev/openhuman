@@ -1125,6 +1125,47 @@ async fn json_rpc_update_check_and_apply_stages_binary() {
         Some(true)
     );
 
+    // --- set_policy: switch to manual mode ---
+    let policy = post_json_rpc(
+        &rpc_base,
+        105,
+        "openhuman.update_set_policy",
+        json!({"mode": "manual", "check_interval_hours": 48}),
+    )
+    .await;
+    let policy_result = assert_no_jsonrpc_error(&policy, "update_set_policy");
+    let policy_payload = policy_result.get("result").unwrap_or(policy_result);
+    assert_eq!(
+        policy_payload.get("mode").and_then(Value::as_str),
+        Some("manual"),
+        "expected mode=manual after set_policy: {policy_payload}"
+    );
+    assert_eq!(
+        policy_payload
+            .get("check_interval_hours")
+            .and_then(Value::as_u64),
+        Some(48),
+        "expected check_interval_hours=48: {policy_payload}"
+    );
+
+    // --- dismiss: suppress prompt for this version ---
+    let dismiss = post_json_rpc(
+        &rpc_base,
+        106,
+        "openhuman.update_dismiss",
+        json!({"version": "0.99.99"}),
+    )
+    .await;
+    let dismiss_result = assert_no_jsonrpc_error(&dismiss, "update_dismiss");
+    let dismiss_payload = dismiss_result.get("result").unwrap_or(dismiss_result);
+    assert_eq!(
+        dismiss_payload
+            .get("should_prompt")
+            .and_then(Value::as_bool),
+        Some(false),
+        "should_prompt should be false after dismissing the available version: {dismiss_payload}"
+    );
+
     mock_join.abort();
     release_join.abort();
     rpc_join.abort();
