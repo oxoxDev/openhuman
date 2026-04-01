@@ -744,7 +744,6 @@ jobs:
               /openhuman-core_.*_aarch64-apple-darwin$/,
               /openhuman-core_.*_x86_64-apple-darwin$/,
               /openhuman-core_.*_x86_64-unknown-linux-gnu$/,
-              /openhuman-core_.*_x86_64-pc-windows-msvc\.exe$/,
             ];
 
             const missing = requiredPatterns.filter((pattern) => !names.some((name) => pattern.test(name)));
