@@ -220,16 +220,19 @@ pub async fn update_check() -> Result<RpcOutcome<UpdateCheckStatus>, String> {
     update_status().await
 }
 
+async fn download_and_stage(asset: &UpdateAsset) -> Result<std::path::PathBuf, String> {
+    let bytes = download_asset(&asset.download_url).await?;
+    verify_digest(&bytes, asset.digest_sha256.as_deref())?;
+    let target_bin = managed_binary_path()?;
+    write_staged_binary(&target_bin, &bytes)
+}
+
 pub async fn update_apply() -> Result<RpcOutcome<UpdateApplyStatus>, String> {
     let mut config = Config::load_or_init().await.map_err(|e| e.to_string())?;
     let latest = check_for_update(&mut config).await?;
     let asset = latest.ok_or_else(|| "no newer update is available".to_string())?;
 
-    let bytes = download_asset(&asset.download_url).await?;
-    verify_digest(&bytes, asset.digest_sha256.as_deref())?;
-
-    let target_bin = managed_binary_path()?;
-    let staged_path = write_staged_binary(&target_bin, &bytes)?;
+    let staged_path = download_and_stage(&asset).await?;
 
     config.update.last_result = Some("staged".to_string());
     config.update.last_error = None;
@@ -279,6 +282,30 @@ pub async fn maybe_background_check() {
     log::debug!("[update] background check is due, running now");
 
     match check_for_update(&mut config).await {
+        Ok(Some(asset)) if matches!(config.update.mode, UpdateMode::Auto) => {
+            log::debug!(
+                "[update] auto mode: downloading and staging version {}",
+                asset.version
+            );
+            match download_and_stage(&asset).await {
+                Ok(staged_path) => {
+                    config.update.last_result = Some("staged".to_string());
+                    config.update.last_error = None;
+                    log::info!(
+                        "[update] auto mode: staged version {} at {}",
+                        asset.version,
+                        staged_path.display()
+                    );
+                }
+                Err(error) => {
+                    config.update.last_error = Some(error.clone());
+                    log::warn!("[update] auto mode: stage failed: {error}");
+                }
+            }
+            if let Err(error) = config.save().await {
+                log::warn!("[update] failed to persist background check result: {error}");
+            }
+        }
         Ok(_) => {
             if let Err(error) = config.save().await {
                 log::warn!("[update] failed to persist background check result: {error}");
