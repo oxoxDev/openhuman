@@ -199,6 +199,9 @@ impl CoreProcessHandle {
     }
 }
 
+/// Activate a staged `.next` sidecar binary before spawning the child process.
+/// Mirrors `openhuman_core::openhuman::update::store::apply_staged_update_for_path`
+/// — kept inline because the Tauri crate does not depend on `openhuman_core`.
 fn apply_staged_sidecar_update(target_bin: &std::path::Path) -> Result<(), String> {
     let mut staged_os = target_bin.as_os_str().to_os_string();
     staged_os.push(".next");
