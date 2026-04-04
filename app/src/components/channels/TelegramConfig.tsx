@@ -21,6 +21,8 @@ import ChannelFieldInput from './ChannelFieldInput';
 import ChannelStatusBadge from './ChannelStatusBadge';
 
 const log = debug('channels:telegram');
+const MANAGED_DM_FOLLOW_UP_MESSAGE =
+  'Managed DM setup will be enabled in a follow-up update.';
 
 interface TelegramConfigProps {
   definition: ChannelDefinition;
@@ -88,65 +90,26 @@ const TelegramConfig = ({ definition }: TelegramConfigProps) => {
         log('connect result: %o', result);
 
         if (result.status === 'pending_auth' && result.auth_action) {
-          dispatch(
-            upsertChannelConnection({
-              channel: 'telegram',
-              authMode: spec.mode,
-              patch: { status: 'connecting' },
-            })
-          );
-
           if (result.auth_action === 'telegram_managed_dm') {
-            // Initiate managed DM flow: get deep link from backend and open it.
-            try {
-              const managed = await callCoreRpc<{
-                result?: { deepLink?: string; token?: string };
-                deepLink?: string;
-                token?: string;
-              }>({
-                method: 'openhuman.channels_initiate_managed_auth',
-                params: { channel: 'telegram' },
-              });
-              const deepLink = managed?.result?.deepLink ?? managed?.deepLink;
-              if (deepLink) {
-                log('opening managed DM deep link: %s', deepLink);
-                await openUrl(deepLink);
-                dispatch(
-                  upsertChannelConnection({
-                    channel: 'telegram',
-                    authMode: spec.mode,
-                    patch: {
-                      status: 'connecting',
-                      lastError: 'Open Telegram and message the bot to complete setup.',
-                    },
-                  })
-                );
-              } else {
-                dispatch(
-                  upsertChannelConnection({
-                    channel: 'telegram',
-                    authMode: spec.mode,
-                    patch: {
-                      status: 'connecting',
-                      lastError: result.message ?? 'Waiting for managed DM setup...',
-                    },
-                  })
-                );
-              }
-            } catch {
-              // Fallback: show the message from the core RPC result.
-              dispatch(
-                upsertChannelConnection({
-                  channel: 'telegram',
-                  authMode: spec.mode,
-                  patch: {
-                    status: 'connecting',
-                    lastError: result.message ?? 'Initiate managed DM flow in Telegram.',
-                  },
-                })
-              );
-            }
+            log('managed dm connect requested before backend flow is enabled');
+            dispatch(
+              upsertChannelConnection({
+                channel: 'telegram',
+                authMode: spec.mode,
+                patch: {
+                  status: 'disconnected',
+                  lastError: result.message ?? MANAGED_DM_FOLLOW_UP_MESSAGE,
+                },
+              })
+            );
           } else if (result.auth_action.includes('oauth')) {
+            dispatch(
+              upsertChannelConnection({
+                channel: 'telegram',
+                authMode: spec.mode,
+                patch: { status: 'connecting' },
+              })
+            );
             try {
               const oauthResponse = await callCoreRpc<{ result: { oauthUrl?: string } }>({
                 method: 'openhuman.auth.oauth_connect',

@@ -1,11 +1,25 @@
-import { screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { FALLBACK_DEFINITIONS } from '../../../lib/channels/definitions';
+import { channelConnectionsApi } from '../../../services/api/channelConnectionsApi';
 import { renderWithProviders } from '../../../test/test-utils';
 import TelegramConfig from '../TelegramConfig';
 
 const telegramDef = FALLBACK_DEFINITIONS.find(d => d.id === 'telegram')!;
+
+vi.mock('../../../services/api/channelConnectionsApi', () => ({
+  channelConnectionsApi: {
+    connectChannel: vi.fn(),
+    disconnectChannel: vi.fn(),
+    listDefinitions: vi.fn(),
+    listStatus: vi.fn(),
+  },
+}));
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
 describe('TelegramConfig', () => {
   it('renders the Telegram header', () => {
@@ -38,6 +52,25 @@ describe('TelegramConfig', () => {
     expect(disconnectButtons.length).toBe(2);
     disconnectButtons.forEach(btn => {
       expect(btn).toBeDisabled();
+    });
+  });
+
+  it('surfaces a follow-up message for managed dm without starting a missing rpc flow', async () => {
+    vi.mocked(channelConnectionsApi.connectChannel).mockResolvedValue({
+      status: 'pending_auth',
+      auth_action: 'telegram_managed_dm',
+      restart_required: false,
+    });
+
+    renderWithProviders(<TelegramConfig definition={telegramDef} />);
+
+    const connectButtons = screen.getAllByText('Connect');
+    fireEvent.click(connectButtons[1]);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Managed DM setup will be enabled in a follow-up update.')
+      ).toBeInTheDocument();
     });
   });
 });
