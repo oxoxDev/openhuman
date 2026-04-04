@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FALLBACK_DEFINITIONS } from '../../../lib/channels/definitions';
 import { channelConnectionsApi } from '../../../services/api/channelConnectionsApi';
 import { managedDmApi } from '../../../services/api/managedDmApi';
-import { openUrl } from '../../../utils/openUrl';
 import { renderWithProviders } from '../../../test/test-utils';
+import { openUrl } from '../../../utils/openUrl';
 import TelegramConfig from '../TelegramConfig';
 
 const telegramDef = FALLBACK_DEFINITIONS.find(d => d.id === 'telegram')!;
@@ -27,9 +27,7 @@ vi.mock('../../../services/api/managedDmApi', () => ({
   },
 }));
 
-vi.mock('../../../utils/openUrl', () => ({
-  openUrl: vi.fn(),
-}));
+vi.mock('../../../utils/openUrl', () => ({ openUrl: vi.fn() }));
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -95,14 +93,14 @@ describe('TelegramConfig', () => {
       expect(managedDmApi.initiateManagedDm).toHaveBeenCalledTimes(1);
     });
     await waitFor(() => {
-      expect(openUrl).toHaveBeenCalledWith('https://t.me/openhuman_bot?start=manageddm_managed-dm-token');
+      expect(openUrl).toHaveBeenCalledWith(
+        'https://t.me/openhuman_bot?start=manageddm_managed-dm-token'
+      );
     });
     await waitFor(() => {
       expect(managedDmApi.pollManagedDmStatusUntilVerified).toHaveBeenCalledWith(
         'managed-dm-token',
-        expect.objectContaining({
-          signal: expect.any(AbortSignal),
-        })
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
       );
     });
     expect(await screen.findByText('Connected')).toBeInTheDocument();

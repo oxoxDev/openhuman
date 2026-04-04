@@ -2,12 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { managedDmApi } from '../managedDmApi';
 
-vi.mock('../../apiClient', () => ({
-  apiClient: {
-    post: vi.fn(),
-    get: vi.fn(),
-  },
-}));
+vi.mock('../../apiClient', () => ({ apiClient: { post: vi.fn(), get: vi.fn() } }));
 
 const apiClient = vi.mocked((await import('../../apiClient')).apiClient);
 
@@ -38,10 +33,7 @@ describe('managedDmApi', () => {
       .mockResolvedValueOnce({ data: { verified: true, telegramUsername: 'telegram-user' } });
 
     await expect(
-      managedDmApi.pollManagedDmStatusUntilVerified('dm-token', {
-        intervalMs: 0,
-        timeoutMs: 100,
-      })
+      managedDmApi.pollManagedDmStatusUntilVerified('dm-token', { intervalMs: 0, timeoutMs: 100 })
     ).resolves.toEqual({ verified: true, telegramUsername: 'telegram-user' });
     expect(apiClient.get).toHaveBeenCalledTimes(2);
   });

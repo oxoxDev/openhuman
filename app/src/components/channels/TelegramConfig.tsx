@@ -90,16 +90,15 @@ const TelegramConfig = ({ definition }: TelegramConfigProps) => {
           }
 
           if (status?.verified) {
-            log('managed dm verified via polling', { key, telegramUsername: status.telegramUsername });
+            log('managed dm verified via polling', {
+              key,
+              telegramUsername: status.telegramUsername,
+            });
             dispatch(
               upsertChannelConnection({
                 channel: 'telegram',
                 authMode: 'managed_dm',
-                patch: {
-                  status: 'connected',
-                  lastError: undefined,
-                  capabilities: ['dm'],
-                },
+                patch: { status: 'connected', lastError: undefined, capabilities: ['dm'] },
               })
             );
             return;
@@ -189,15 +188,13 @@ const TelegramConfig = ({ definition }: TelegramConfigProps) => {
                 upsertChannelConnection({
                   channel: 'telegram',
                   authMode: spec.mode,
-                  patch: {
-                    status: 'connecting',
-                    lastError: MANAGED_DM_CONNECTING_MESSAGE,
-                  },
+                  patch: { status: 'connecting', lastError: MANAGED_DM_CONNECTING_MESSAGE },
                 })
               );
               startManagedDmPolling(key, initiated.token);
             } catch (managedDmError) {
-              const msg = managedDmError instanceof Error ? managedDmError.message : String(managedDmError);
+              const msg =
+                managedDmError instanceof Error ? managedDmError.message : String(managedDmError);
               log('managed dm initiate failed', { key, error: msg });
               dispatch(
                 upsertChannelConnection({

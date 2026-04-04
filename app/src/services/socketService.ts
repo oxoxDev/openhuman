@@ -240,7 +240,8 @@ class SocketService {
       const obj = data as Record<string, unknown> | null;
       if (!obj || typeof obj !== 'object') return;
       const token = typeof obj.token === 'string' ? obj.token : undefined;
-      const telegramUsername = typeof obj.telegramUsername === 'string' ? obj.telegramUsername : undefined;
+      const telegramUsername =
+        typeof obj.telegramUsername === 'string' ? obj.telegramUsername : undefined;
       const chatId = typeof obj.chatId === 'number' ? obj.chatId : undefined;
       if (!token) return;
 
@@ -249,11 +250,7 @@ class SocketService {
         upsertChannelConnection({
           channel: 'telegram',
           authMode: 'managed_dm',
-          patch: {
-            status: 'connected',
-            lastError: undefined,
-            capabilities: ['dm'],
-          },
+          patch: { status: 'connected', lastError: undefined, capabilities: ['dm'] },
         })
       );
     });
