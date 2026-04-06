@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub struct DiscordChannel {
     bot_token: String,
     guild_id: Option<String>,
+    channel_id: Option<String>,
     allowed_users: Vec<String>,
     listen_to_bots: bool,
     mention_only: bool,
@@ -20,6 +21,7 @@ impl DiscordChannel {
     pub fn new(
         bot_token: String,
         guild_id: Option<String>,
+        channel_id: Option<String>,
         allowed_users: Vec<String>,
         listen_to_bots: bool,
         mention_only: bool,
@@ -27,6 +29,7 @@ impl DiscordChannel {
         Self {
             bot_token,
             guild_id,
+            channel_id,
             allowed_users,
             listen_to_bots,
             mention_only,
@@ -295,6 +298,7 @@ impl Channel for DiscordChannel {
         });
 
         let guild_filter = self.guild_id.clone();
+        let channel_filter = self.channel_id.clone();
 
         loop {
             tokio::select! {
@@ -382,6 +386,14 @@ impl Channel for DiscordChannel {
                             if g != gid {
                                 continue;
                             }
+                        }
+                    }
+
+                    // Channel filter — only process messages from the configured channel
+                    if let Some(ref cid) = channel_filter {
+                        let msg_channel = d.get("channel_id").and_then(serde_json::Value::as_str).unwrap_or("");
+                        if msg_channel != cid {
+                            continue;
                         }
                     }
 
@@ -476,7 +488,7 @@ mod tests {
 
     #[test]
     fn discord_channel_name() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         assert_eq!(ch.name(), "discord");
     }
 
@@ -497,14 +509,14 @@ mod tests {
 
     #[test]
     fn empty_allowlist_denies_everyone() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         assert!(!ch.is_user_allowed("12345"));
         assert!(!ch.is_user_allowed("anyone"));
     }
 
     #[test]
     fn wildcard_allows_everyone() {
-        let ch = DiscordChannel::new("fake".into(), None, vec!["*".into()], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec!["*".into()], false, false);
         assert!(ch.is_user_allowed("12345"));
         assert!(ch.is_user_allowed("anyone"));
     }
@@ -513,6 +525,7 @@ mod tests {
     fn specific_allowlist_filters() {
         let ch = DiscordChannel::new(
             "fake".into(),
+            None,
             None,
             vec!["111".into(), "222".into()],
             false,
@@ -526,7 +539,7 @@ mod tests {
 
     #[test]
     fn allowlist_is_exact_match_not_substring() {
-        let ch = DiscordChannel::new("fake".into(), None, vec!["111".into()], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec!["111".into()], false, false);
         assert!(!ch.is_user_allowed("1111"));
         assert!(!ch.is_user_allowed("11"));
         assert!(!ch.is_user_allowed("0111"));
@@ -534,7 +547,7 @@ mod tests {
 
     #[test]
     fn allowlist_empty_string_user_id() {
-        let ch = DiscordChannel::new("fake".into(), None, vec!["111".into()], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec!["111".into()], false, false);
         assert!(!ch.is_user_allowed(""));
     }
 
@@ -542,6 +555,7 @@ mod tests {
     fn allowlist_with_wildcard_and_specific() {
         let ch = DiscordChannel::new(
             "fake".into(),
+            None,
             None,
             vec!["111".into(), "*".into()],
             false,
@@ -553,7 +567,7 @@ mod tests {
 
     #[test]
     fn allowlist_case_sensitive() {
-        let ch = DiscordChannel::new("fake".into(), None, vec!["ABC".into()], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec!["ABC".into()], false, false);
         assert!(ch.is_user_allowed("ABC"));
         assert!(!ch.is_user_allowed("abc"));
         assert!(!ch.is_user_allowed("Abc"));
@@ -753,14 +767,14 @@ mod tests {
 
     #[test]
     fn typing_handle_starts_as_none() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         let guard = ch.typing_handle.lock();
         assert!(guard.is_none());
     }
 
     #[tokio::test]
     async fn start_typing_sets_handle() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         let _ = ch.start_typing("123456").await;
         let guard = ch.typing_handle.lock();
         assert!(guard.is_some());
@@ -768,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_typing_clears_handle() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         let _ = ch.start_typing("123456").await;
         let _ = ch.stop_typing("123456").await;
         let guard = ch.typing_handle.lock();
@@ -777,14 +791,14 @@ mod tests {
 
     #[tokio::test]
     async fn stop_typing_is_idempotent() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         assert!(ch.stop_typing("123456").await.is_ok());
         assert!(ch.stop_typing("123456").await.is_ok());
     }
 
     #[tokio::test]
     async fn start_typing_replaces_existing_task() {
-        let ch = DiscordChannel::new("fake".into(), None, vec![], false, false);
+        let ch = DiscordChannel::new("fake".into(), None, None, vec![], false, false);
         let _ = ch.start_typing("111").await;
         let _ = ch.start_typing("222").await;
         let guard = ch.typing_handle.lock();
