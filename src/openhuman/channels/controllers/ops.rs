@@ -593,10 +593,7 @@ pub async fn discord_list_guilds(
     let guilds = api::list_bot_guilds(&token)
         .await
         .map_err(|e| format!("Discord API error: {e}"))?;
-    Ok(RpcOutcome::single_log(
-        guilds,
-        "discord guilds listed",
-    ))
+    Ok(RpcOutcome::single_log(guilds, "discord guilds listed"))
 }
 
 /// List text channels in a Discord guild.

@@ -153,11 +153,7 @@ pub async fn check_channel_permissions(
     let member_role_ids: Vec<&str> = member
         .get("roles")
         .and_then(|r| r.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<&str>>()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<&str>>())
         .unwrap_or_default();
 
     // Compute base permissions from @everyone role + member roles
@@ -201,7 +197,11 @@ pub async fn check_channel_permissions(
             .get("permission_overwrites")
             .and_then(|o| o.as_array())
         {
-            let bot_user_id = member.get("user").and_then(|u| u.get("id")).and_then(|i| i.as_str()).unwrap_or("");
+            let bot_user_id = member
+                .get("user")
+                .and_then(|u| u.get("id"))
+                .and_then(|i| i.as_str())
+                .unwrap_or("");
             for overwrite in overwrites {
                 let ow_id = overwrite.get("id").and_then(|i| i.as_str()).unwrap_or("");
                 let ow_type = overwrite.get("type").and_then(|t| t.as_u64()).unwrap_or(0);

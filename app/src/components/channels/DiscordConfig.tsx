@@ -212,9 +212,7 @@ const DiscordConfig = ({ definition }: DiscordConfigProps) => {
             {spec.mode === 'bot_token' && status === 'connected' && (
               <DiscordServerChannelPicker
                 onGuildSelected={guildId => updateField(compositeKey, 'guild_id', guildId)}
-                onChannelSelected={channelId =>
-                  updateField(compositeKey, 'channel_id', channelId)
-                }
+                onChannelSelected={channelId => updateField(compositeKey, 'channel_id', channelId)}
               />
             )}
           </div>

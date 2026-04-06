@@ -49,8 +49,7 @@ describe('DiscordServerChannelPicker', () => {
     renderWithProviders(<DiscordServerChannelPicker />);
     await waitFor(() => {
       expect(
-        screen.getByRole('combobox', { name: /server/i }) ||
-          screen.getByText('Select a server')
+        screen.getByRole('combobox', { name: /server/i }) || screen.getByText('Select a server')
       ).toBeInTheDocument();
     });
   });

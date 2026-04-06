@@ -508,7 +508,9 @@ fn handle_discord_check_permissions(params: Map<String, Value>) -> ControllerFut
     Box::pin(async move {
         let config = config_rpc::load_config_with_timeout().await?;
         let p = deserialize_params::<DiscordCheckPermissionsParams>(params)?;
-        to_json(ops::discord_check_permissions(&config, p.guild_id.trim(), p.channel_id.trim()).await?)
+        to_json(
+            ops::discord_check_permissions(&config, p.guild_id.trim(), p.channel_id.trim()).await?,
+        )
     })
 }
 

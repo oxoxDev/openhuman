@@ -152,8 +152,7 @@ const DiscordServerChannelPicker = ({
           value={selectedGuildId}
           onChange={e => handleGuildChange(e.target.value)}
           disabled={isLoading || guilds.length === 0}
-          className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 focus:border-primary-500 focus:outline-none disabled:opacity-50"
-        >
+          className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 focus:border-primary-500 focus:outline-none disabled:opacity-50">
           <option value="">
             {state === 'loading_guilds'
               ? 'Loading servers...'
@@ -185,8 +184,7 @@ const DiscordServerChannelPicker = ({
             value={selectedChannelId}
             onChange={e => handleChannelChange(e.target.value)}
             disabled={isLoading || channels.length === 0}
-            className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 focus:border-primary-500 focus:outline-none disabled:opacity-50"
-          >
+            className="w-full rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-900 focus:border-primary-500 focus:outline-none disabled:opacity-50">
             <option value="">
               {state === 'loading_channels'
                 ? 'Loading channels...'
@@ -230,8 +228,7 @@ const DiscordServerChannelPicker = ({
             permissions.missing_permissions.length === 0
               ? 'border-sage-200 bg-sage-50 text-sage-700'
               : 'border-amber-200 bg-amber-50 text-amber-700'
-          }`}
-        >
+          }`}>
           {permissions.missing_permissions.length === 0 ? (
             <span>Bot has all required permissions in this channel.</span>
           ) : (
