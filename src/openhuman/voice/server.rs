@@ -153,8 +153,12 @@ impl VoiceServer {
             tokio::sync::oneshot::Receiver<Result<RecordingHandle, String>>,
         > = None;
         let mut pending_expected_app: Option<String> = None;
-        // Set when Release arrives before recording has started.
-        let mut pending_release = false;
+        // Set when a stop-intent event (Release/Pressed toggle) arrives before
+        // recording has started.
+        let mut pending_stop = false;
+        // Deferred stop deadline used when stop intent arrives during setup.
+        // Keeping this in a select! branch avoids blocking the hotkey loop.
+        let mut deferred_stop_deadline: Option<tokio::time::Instant> = None;
 
         /// Minimum recording duration after setup completes. If the user
         /// released the hotkey while cpal was still initialising, we keep
@@ -167,6 +171,12 @@ impl VoiceServer {
             let pending_ready = async {
                 match recording_pending_rx.as_mut() {
                     Some(rx) => rx.await,
+                    None => std::future::pending().await,
+                }
+            };
+            let deferred_stop_ready = async {
+                match deferred_stop_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => std::future::pending().await,
                 }
             };
@@ -193,6 +203,7 @@ impl VoiceServer {
                                 // Recording in progress → stop it (tap toggle or
                                 // unreliable-release keys like Fn that always send Pressed).
                                 debug!("{LOG_PREFIX} hotkey pressed while recording → stopping");
+                                deferred_stop_deadline = None;
                                 if let Some(handle) = recording.take() {
                                     self.spawn_process_recording(
                                         handle,
@@ -201,7 +212,8 @@ impl VoiceServer {
                                     );
                                 }
                             } else if recording_pending_rx.is_some() {
-                                debug!("{LOG_PREFIX} hotkey pressed while recording setup pending — ignoring");
+                                info!("{LOG_PREFIX} hotkey pressed while recording setup pending — buffering stop intent");
+                                pending_stop = true;
                             } else {
                                 let expected_app = capture_expected_app_name();
                                 debug!("{LOG_PREFIX} hotkey pressed → starting recording (non-blocking)");
@@ -215,7 +227,8 @@ impl VoiceServer {
                                 });
                                 recording_pending_rx = Some(rx);
                                 pending_expected_app = expected_app;
-                                pending_release = false;
+                                pending_stop = false;
+                                deferred_stop_deadline = None;
                                 *self.state.lock().await = ServerState::Recording;
                             }
                         }
@@ -227,6 +240,7 @@ impl VoiceServer {
                             );
                             if let Some(handle) = recording.take() {
                                 debug!("{LOG_PREFIX} hotkey released → stopping recording");
+                                deferred_stop_deadline = None;
                                 self.spawn_process_recording(
                                     handle,
                                     app_config,
@@ -234,9 +248,9 @@ impl VoiceServer {
                                 );
                             } else if recording_pending_rx.is_some() {
                                 // Release arrived before recording setup finished.
-                                // Buffer it — we'll handle it once the handle arrives.
+                                // Buffer stop intent — we'll handle it once the handle arrives.
                                 info!("{LOG_PREFIX} release buffered — recording setup still pending");
-                                pending_release = true;
+                                pending_stop = true;
                             } else {
                                 debug!("{LOG_PREFIX} release received with no active recording (normal for unreliable-release keys)");
                             }
@@ -249,48 +263,60 @@ impl VoiceServer {
                     recording_pending_rx = None;
                     match result {
                         Ok(Ok(handle)) => {
-                            info!("{LOG_PREFIX} recording handle ready (pending_release={pending_release})");
-                            if pending_release {
-                                // The user already released the hotkey while cpal
-                                // was initialising. Record for a minimum duration
-                                // to capture the speech they spoke during setup.
-                                pending_release = false;
+                            info!("{LOG_PREFIX} recording handle ready (pending_stop={pending_stop})");
+                            if pending_stop {
+                                // A stop intent arrived while cpal was initialising.
+                                // Keep recording for a minimum duration, then stop
+                                // via non-blocking deferred deadline branch.
+                                pending_stop = false;
                                 recording = Some(handle);
                                 recording_expected_app = pending_expected_app.take();
 
                                 info!(
-                                    "{LOG_PREFIX} deferred release: recording for at least {}ms",
+                                    "{LOG_PREFIX} deferred stop: recording for at least {}ms",
                                     MIN_RECORDING_AFTER_SETUP.as_millis()
                                 );
-                                tokio::time::sleep(MIN_RECORDING_AFTER_SETUP).await;
-                                // After the minimum duration, stop and process.
-                                if let Some(handle) = recording.take() {
-                                    self.spawn_process_recording(
-                                        handle,
-                                        app_config,
-                                        recording_expected_app.take(),
-                                    );
-                                }
+                                deferred_stop_deadline = Some(
+                                    tokio::time::Instant::now() + MIN_RECORDING_AFTER_SETUP,
+                                );
                             } else {
                                 recording = Some(handle);
                                 recording_expected_app = pending_expected_app.take();
+                                deferred_stop_deadline = None;
 
                                 info!("{LOG_PREFIX} recording started (live)");
                             }
                         }
                         Ok(Err(e)) => {
-                            pending_release = false;
+                            pending_stop = false;
+                            deferred_stop_deadline = None;
                             pending_expected_app = None;
                             error!("{LOG_PREFIX} failed to start recording: {e}");
                             *self.state.lock().await = ServerState::Idle;
                             *self.last_error.lock().await = Some(e);
                         }
                         Err(_) => {
-                            pending_release = false;
+                            pending_stop = false;
+                            deferred_stop_deadline = None;
                             pending_expected_app = None;
                             error!("{LOG_PREFIX} recording setup task dropped");
                             *self.state.lock().await = ServerState::Idle;
                         }
+                    }
+                }
+
+                _ = deferred_stop_ready => {
+                    deferred_stop_deadline = None;
+                    if let Some(handle) = recording.take() {
+                        info!(
+                            "{LOG_PREFIX} deferred stop deadline reached after {}ms, stopping recording",
+                            MIN_RECORDING_AFTER_SETUP.as_millis()
+                        );
+                        self.spawn_process_recording(
+                            handle,
+                            app_config,
+                            recording_expected_app.take(),
+                        );
                     }
                 }
 

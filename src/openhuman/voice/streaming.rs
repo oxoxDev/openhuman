@@ -41,6 +41,7 @@ pub async fn handle_dictation_ws(mut socket: WebSocket, config: Arc<Config>) {
     log::info!("{LOG_PREFIX} new streaming dictation connection");
 
     let audio_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
+    let full_audio_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
     let audio_revision = Arc::new(AtomicU64::new(0));
     let interval_ms = config.dictation.streaming_interval_ms;
     let do_streaming = config.dictation.streaming;
@@ -129,6 +130,7 @@ pub async fn handle_dictation_ws(mut socket: WebSocket, config: Arc<Config>) {
                             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
                             .collect();
 
+                        full_audio_buf.lock().await.extend_from_slice(&samples);
                         let mut buf = audio_buf.lock().await;
                         buf.extend_from_slice(&samples);
                         if buf.len() > MAX_STREAM_BUFFER_SAMPLES {
@@ -185,7 +187,7 @@ pub async fn handle_dictation_ws(mut socket: WebSocket, config: Arc<Config>) {
     }
 
     // Run final transcription on the complete buffer
-    let final_samples = audio_buf.lock().await.clone();
+    let final_samples = full_audio_buf.lock().await.clone();
     if final_samples.is_empty() {
         let msg = serde_json::json!({
             "type": "final",

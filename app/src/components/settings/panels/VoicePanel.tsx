@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   openhumanGetVoiceServerSettings,
@@ -29,11 +29,21 @@ const VoicePanel = () => {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [newDictWord, setNewDictWord] = useState('');
+  const settingsRef = useRef<VoiceServerSettings | null>(null);
+  const savedSettingsRef = useRef<VoiceServerSettings | null>(null);
 
   const hasUnsavedChanges =
     settings != null &&
     savedSettings != null &&
     JSON.stringify(settings) !== JSON.stringify(savedSettings);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    savedSettingsRef.current = savedSettings;
+  }, [savedSettings]);
 
   const loadData = async (forceSettings = false) => {
     try {
@@ -46,10 +56,12 @@ const VoicePanel = () => {
       // Only overwrite local settings if there are no unsaved edits,
       // or if explicitly forced (e.g. after save or initial load).
       // This prevents the 2s polling timer from clobbering user input.
+      const currentSettings = settingsRef.current;
+      const currentSavedSettings = savedSettingsRef.current;
       if (
         forceSettings ||
-        !settings ||
-        JSON.stringify(settings) === JSON.stringify(savedSettings)
+        !currentSettings ||
+        JSON.stringify(currentSettings) === JSON.stringify(currentSavedSettings)
       ) {
         setSettings(settingsResponse.result);
       }
