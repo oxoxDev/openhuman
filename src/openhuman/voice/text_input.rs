@@ -79,7 +79,9 @@ pub fn insert_text(text: &str, expected_app: Option<&str>) -> Result<(), String>
             // text field yet, activating the app brings it to front and most
             // apps will accept Cmd+V into their last-focused element.
             if let Err(restore_err) = restore_focus_to_app(app_name) {
-                warn!("{LOG_PREFIX} focus restore failed: {restore_err} — will attempt paste anyway");
+                warn!(
+                    "{LOG_PREFIX} focus restore failed: {restore_err} — will attempt paste anyway"
+                );
             } else {
                 info!("{LOG_PREFIX} focus restored to '{app_name}' before paste");
             }
