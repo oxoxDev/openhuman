@@ -3,11 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { subscribeChatEvents } from '../chatService';
 import { socketService } from '../socketService';
 
-vi.mock('../socketService', () => ({
-  socketService: {
-    getSocket: vi.fn(),
-  },
-}));
+vi.mock('../socketService', () => ({ socketService: { getSocket: vi.fn() } }));
 
 type Handler = (...args: unknown[]) => void;
 
@@ -31,12 +27,7 @@ function createMockSocket() {
     }
   };
 
-  return {
-    id: 'socket-1',
-    on,
-    off,
-    emit,
-  };
+  return { id: 'socket-1', on, off, emit };
 }
 
 describe('chatService.subscribeChatEvents', () => {
@@ -89,10 +80,7 @@ describe('chatService.subscribeChatEvents', () => {
     const socket = createMockSocket();
     vi.mocked(socketService.getSocket).mockReturnValue(socket as never);
 
-    const cleanup = subscribeChatEvents({
-      onToolCall: () => {},
-      onDone: () => {},
-    });
+    const cleanup = subscribeChatEvents({ onToolCall: () => {}, onDone: () => {} });
     cleanup();
 
     const unsubscribedEvents = socket.off.mock.calls.map(call => call[0]);
