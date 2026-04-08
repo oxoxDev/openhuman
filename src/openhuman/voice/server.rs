@@ -815,7 +815,10 @@ fn is_hallucinated_output(text: &str) -> bool {
         for ngram_len in 2..=3 {
             if words.len() >= ngram_len * 3 {
                 let pattern: Vec<&str> = words[..ngram_len].to_vec();
-                let repetitions = words.chunks(ngram_len).filter(|c| *c == &pattern[..]).count();
+                let repetitions = words
+                    .chunks(ngram_len)
+                    .filter(|c| *c == &pattern[..])
+                    .count();
                 // If at least 60% of chunks match the pattern, it's a repetition loop.
                 let total_chunks = (words.len() + ngram_len - 1) / ngram_len;
                 if repetitions >= 3 && repetitions * 100 / total_chunks >= 60 {
