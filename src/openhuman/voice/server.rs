@@ -160,6 +160,13 @@ impl VoiceServer {
         // Keeping this in a select! branch avoids blocking the hotkey loop.
         let mut deferred_stop_deadline: Option<tokio::time::Instant> = None;
 
+        // Debounce: macOS Fn key fires a phantom Press+Release tap before the
+        // real sustained press. We delay recording start by PRESS_DEBOUNCE_MS;
+        // if a Release arrives within that window, we discard both events.
+        const PRESS_DEBOUNCE_MS: u64 = 300;
+        let mut press_debounce_deadline: Option<tokio::time::Instant> = None;
+        let mut debounce_expected_app: Option<String> = None;
+
         /// Minimum recording duration after setup completes. If the user
         /// released the hotkey while cpal was still initialising, we keep
         /// recording for at least this long to capture actual speech.
@@ -176,6 +183,12 @@ impl VoiceServer {
             };
             let deferred_stop_ready = async {
                 match deferred_stop_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let press_debounce_ready = async {
+                match press_debounce_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => std::future::pending().await,
                 }
@@ -214,31 +227,34 @@ impl VoiceServer {
                             } else if recording_pending_rx.is_some() {
                                 info!("{LOG_PREFIX} hotkey pressed while recording setup pending — buffering stop intent");
                                 pending_stop = true;
+                            } else if press_debounce_deadline.is_some() {
+                                // Another Press during debounce — ignore (shouldn't happen normally).
+                                debug!("{LOG_PREFIX} duplicate press during debounce window, ignoring");
                             } else {
+                                // Start debounce: capture app now, but delay recording
+                                // start to absorb phantom Fn taps on macOS.
                                 let expected_app = capture_expected_app_name();
-                                debug!("{LOG_PREFIX} hotkey pressed → starting recording (non-blocking)");
-
-                                // Start recording on a blocking thread so the
-                                // event loop remains responsive to Release.
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                tokio::task::spawn_blocking(move || {
-                                    let result = audio_capture::start_recording();
-                                    let _ = tx.send(result);
-                                });
-                                recording_pending_rx = Some(rx);
-                                pending_expected_app = expected_app;
-                                pending_stop = false;
-                                deferred_stop_deadline = None;
-                                *self.state.lock().await = ServerState::Recording;
+                                debug!("{LOG_PREFIX} hotkey pressed → debouncing ({PRESS_DEBOUNCE_MS}ms)");
+                                press_debounce_deadline = Some(
+                                    tokio::time::Instant::now()
+                                        + Duration::from_millis(PRESS_DEBOUNCE_MS),
+                                );
+                                debounce_expected_app = expected_app;
                             }
                         }
                         HotkeyEvent::Released => {
                             info!(
-                                "{LOG_PREFIX} received hotkey event=Released recording={} pending={}",
+                                "{LOG_PREFIX} received hotkey event=Released recording={} pending={} debounce={}",
                                 recording.is_some(),
-                                recording_pending_rx.is_some()
+                                recording_pending_rx.is_some(),
+                                press_debounce_deadline.is_some()
                             );
-                            if let Some(handle) = recording.take() {
+                            if press_debounce_deadline.is_some() {
+                                // Release arrived within debounce window — phantom Fn tap.
+                                info!("{LOG_PREFIX} release during debounce → phantom tap, discarding");
+                                press_debounce_deadline = None;
+                                debounce_expected_app = None;
+                            } else if let Some(handle) = recording.take() {
                                 debug!("{LOG_PREFIX} hotkey released → stopping recording");
                                 deferred_stop_deadline = None;
                                 self.spawn_process_recording(
@@ -256,6 +272,23 @@ impl VoiceServer {
                             }
                         }
                     }
+                }
+
+                // Press debounce expired — the key is genuinely held down, start recording.
+                _ = press_debounce_ready => {
+                    press_debounce_deadline = None;
+                    debug!("{LOG_PREFIX} debounce expired → starting recording (non-blocking)");
+
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    tokio::task::spawn_blocking(move || {
+                        let result = audio_capture::start_recording();
+                        let _ = tx.send(result);
+                    });
+                    recording_pending_rx = Some(rx);
+                    pending_expected_app = debounce_expected_app.take();
+                    pending_stop = false;
+                    deferred_stop_deadline = None;
+                    *self.state.lock().await = ServerState::Recording;
                 }
 
                 result = pending_ready => {
@@ -386,17 +419,31 @@ fn capture_expected_app_name() -> Option<String> {
                 .filter(|s| !s.is_empty());
             if let Some(app_name) = app {
                 debug!("{LOG_PREFIX} captured focused app on press: '{app_name}'");
-                Some(app_name.to_string())
-            } else {
-                debug!("{LOG_PREFIX} focus query returned no app name on press");
-                None
+                return Some(app_name.to_string());
             }
+            debug!(
+                "{LOG_PREFIX} focus query returned no app name on press, falling back to foreground app"
+            );
         }
         Err(e) => {
-            warn!("{LOG_PREFIX} failed to capture focused app on press: {e}");
-            None
+            warn!("{LOG_PREFIX} failed to capture focused app on press via focus query: {e}");
         }
     }
+
+    if let Some(ctx) = accessibility::foreground_context() {
+        if let Some(app_name) = ctx
+            .app_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            debug!("{LOG_PREFIX} captured foreground app on press: '{app_name}'");
+            return Some(app_name.to_string());
+        }
+    }
+
+    debug!("{LOG_PREFIX} unable to determine focused/foreground app on press");
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -755,12 +802,26 @@ fn is_hallucinated_output(text: &str) -> bool {
         }
     }
 
-    // Detect repeated short phrases (e.g. "you you you you").
+    // Detect repeated short phrases (e.g. "you you you you" or "and go and go and go").
     let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() >= 3 {
+        // Single-word repetition: "you you you you"
         let first = words[0];
         if words.iter().all(|w| *w == first) {
             return true;
+        }
+
+        // N-gram repetition (bigram/trigram): "and go and go and go"
+        for ngram_len in 2..=3 {
+            if words.len() >= ngram_len * 3 {
+                let pattern: Vec<&str> = words[..ngram_len].to_vec();
+                let repetitions = words.chunks(ngram_len).filter(|c| *c == &pattern[..]).count();
+                // If at least 60% of chunks match the pattern, it's a repetition loop.
+                let total_chunks = (words.len() + ngram_len - 1) / ngram_len;
+                if repetitions >= 3 && repetitions * 100 / total_chunks >= 60 {
+                    return true;
+                }
+            }
         }
     }
 
@@ -805,9 +866,16 @@ mod tests {
         assert!(is_hallucinated_output("Thanks."));
         assert!(is_hallucinated_output("Bye."));
         assert!(is_hallucinated_output("Goodbye."));
-        // Repeated words.
+        // Repeated words (single word).
         assert!(is_hallucinated_output("you you you you"));
         assert!(is_hallucinated_output("the the the the"));
+        // Repeated bigrams/trigrams.
+        assert!(is_hallucinated_output(
+            "and go and go and go and go and go and go"
+        ));
+        assert!(is_hallucinated_output(
+            "I know I know I know I know I know I know"
+        ));
         // Punctuation-only.
         assert!(is_hallucinated_output("..."));
         assert!(is_hallucinated_output("."));

@@ -150,7 +150,7 @@ pub fn start_listener(
                         }
 
                         // Check if all modifiers are held.
-                        if !hotkey.modifiers.iter().all(|m| keys.contains(m)) {
+                        if !hotkey.modifiers.iter().all(|m| modifier_held(&keys, *m)) {
                             return;
                         }
 
@@ -231,6 +231,29 @@ pub fn start_listener(
         },
         rx,
     ))
+}
+
+/// Returns true when a required modifier is currently held.
+///
+/// Generic config aliases (ctrl/shift/alt/cmd) map to one side in parsing
+/// (usually left), but users may physically press either side. We treat the
+/// symmetric pair as equivalent for matching.
+fn modifier_held(pressed: &HashSet<Key>, required: Key) -> bool {
+    if pressed.contains(&required) {
+        return true;
+    }
+
+    match required {
+        Key::ControlLeft => pressed.contains(&Key::ControlRight),
+        Key::ControlRight => pressed.contains(&Key::ControlLeft),
+        Key::ShiftLeft => pressed.contains(&Key::ShiftRight),
+        Key::ShiftRight => pressed.contains(&Key::ShiftLeft),
+        Key::MetaLeft => pressed.contains(&Key::MetaRight),
+        Key::MetaRight => pressed.contains(&Key::MetaLeft),
+        Key::Alt => pressed.contains(&Key::AltGr),
+        Key::AltGr => pressed.contains(&Key::Alt),
+        _ => false,
+    }
 }
 
 /// Convert a string key name to an rdev Key.

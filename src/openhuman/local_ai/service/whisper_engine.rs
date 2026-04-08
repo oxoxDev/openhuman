@@ -13,7 +13,9 @@ use parking_lot::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Per-segment confidence threshold: reject segments with avg log-probability below this.
-const SEGMENT_LOGPROB_REJECT: f32 = -0.7;
+/// With the tiny model, real speech often scores -0.7 to -1.0; hallucinations are typically
+/// below -1.2. Use a relaxed threshold to avoid rejecting legitimate speech.
+const SEGMENT_LOGPROB_REJECT: f32 = -1.2;
 
 /// Per-segment entropy threshold: reject segments with entropy above this.
 const SEGMENT_ENTROPY_REJECT: f32 = 2.4;

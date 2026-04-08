@@ -52,6 +52,14 @@ fn publish_dictation_event(event: DictationEvent) {
 /// When the hotkey fires, publishes a `DictationEvent` to the broadcast
 /// channel that the Socket.IO bridge forwards to all connected clients.
 pub async fn start_if_enabled(config: &Config) {
+    if config.voice_server.auto_start {
+        log::info!(
+            "{LOG_PREFIX} voice_server.auto_start=true; skipping dictation listener \
+             (voice server owns the rdev hotkey listener — only one can run per process)"
+        );
+        return;
+    }
+
     if !config.dictation.enabled {
         log::info!("{LOG_PREFIX} dictation disabled in config, skipping hotkey listener");
         return;
