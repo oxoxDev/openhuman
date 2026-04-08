@@ -15,6 +15,7 @@ import {
   subscribeChatEvents,
   useRustChat,
 } from '../services/chatService';
+import { socketService } from '../services/socketService';
 import { store } from '../store';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { selectSocketStatus } from '../store/socketSelectors';
@@ -234,12 +235,7 @@ const Conversations = () => {
   }, [messages]);
 
   useEffect(() => {
-    const onDictationInsert = (event: Event) => {
-      const customEvent = event as CustomEvent<{ text?: string }>;
-      const text = customEvent.detail?.text?.trim();
-      if (!text) return;
-
-      customEvent.preventDefault();
+    const applyDictationInsert = (text: string) => {
       setInputMode('text');
       setInputValue(prev => {
         const base = prev.trim();
@@ -252,9 +248,31 @@ const Conversations = () => {
       });
     };
 
+    const onDictationInsert = (event: Event) => {
+      const customEvent = event as CustomEvent<{ text?: string }>;
+      const text = customEvent.detail?.text?.trim();
+      if (!text) return;
+      customEvent.preventDefault();
+      applyDictationInsert(text);
+    };
+
+    const onSocketDictationInsert = (payload: unknown) => {
+      const text =
+        payload && typeof payload === 'object' && 'text' in payload
+          ? String((payload as { text?: string }).text ?? '').trim()
+          : '';
+      if (!text) return;
+      applyDictationInsert(text);
+    };
+
     window.addEventListener('dictation://insert-text', onDictationInsert as EventListener);
-    return () =>
+    socketService.on('dictation:insert-text', onSocketDictationInsert);
+    socketService.on('dictation_insert_text', onSocketDictationInsert);
+    return () => {
       window.removeEventListener('dictation://insert-text', onDictationInsert as EventListener);
+      socketService.off('dictation:insert-text', onSocketDictationInsert);
+      socketService.off('dictation_insert_text', onSocketDictationInsert);
+    };
   }, []);
 
   useEffect(() => {

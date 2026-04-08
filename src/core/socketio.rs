@@ -242,6 +242,32 @@ pub fn spawn_web_channel_bridge(io: SocketIo) {
         }
         log::debug!("[socketio] dictation bridge stopped");
     });
+
+    // Dictation insert fallback events → broadcast to connected clients.
+    tokio::spawn(async move {
+        let mut rx =
+            crate::openhuman::voice::server::subscribe_dictation_insert_fallback_events();
+        loop {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!(
+                        "[socketio] dropped {} dictation insert fallback events due to lag",
+                        skipped
+                    );
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+
+            if let Ok(payload) = serde_json::to_value(&event) {
+                log::debug!("[socketio] broadcast dictation insert fallback");
+                let _ = io.emit("dictation:insert-text", &payload);
+                let _ = io.emit("dictation_insert_text", &payload);
+            }
+        }
+        log::debug!("[socketio] dictation insert fallback bridge stopped");
+    });
 }
 
 fn emit_web_channel_event(io: &SocketIo, event: WebChannelEvent) {

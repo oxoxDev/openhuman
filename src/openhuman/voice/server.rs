@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
-use tokio::sync::Mutex;
+use once_cell::sync::Lazy;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "macos")]
@@ -22,6 +23,30 @@ use super::hotkey::{self, ActivationMode, HotkeyEvent};
 use super::text_input;
 
 const LOG_PREFIX: &str = "[voice_server]";
+
+/// Fallback event emitted when OS-level paste fails for OpenHuman so the UI can
+/// insert the transcript directly into its chat input.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DictationInsertFallbackEvent {
+    pub text: String,
+    pub app_name: Option<String>,
+}
+
+static DICTATION_INSERT_FALLBACK_BUS: Lazy<broadcast::Sender<DictationInsertFallbackEvent>> =
+    Lazy::new(|| {
+        let (tx, _rx) = broadcast::channel(64);
+        tx
+    });
+
+/// Subscribe to dictation insert fallback events (used by Socket.IO bridge).
+pub fn subscribe_dictation_insert_fallback_events(
+) -> broadcast::Receiver<DictationInsertFallbackEvent> {
+    DICTATION_INSERT_FALLBACK_BUS.subscribe()
+}
+
+fn publish_dictation_insert_fallback_event(event: DictationInsertFallbackEvent) {
+    let _ = DICTATION_INSERT_FALLBACK_BUS.send(event);
+}
 
 /// Running state of the voice server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -604,6 +629,18 @@ async fn process_recording_bg(
                         let insert_started = Instant::now();
                         if let Err(e) = text_input::insert_text(text, expected_app.as_deref()) {
                             error!("{LOG_PREFIX} failed to insert text: {e}");
+                            if should_emit_openhuman_insert_fallback(expected_app.as_deref()) {
+                                info!(
+                                    "{LOG_PREFIX} emitting OpenHuman insert fallback event ({} chars)",
+                                    text.len()
+                                );
+                                publish_dictation_insert_fallback_event(
+                                    DictationInsertFallbackEvent {
+                                        text: text.to_string(),
+                                        app_name: expected_app.clone(),
+                                    },
+                                );
+                            }
                             *last_error.lock().await = Some(e);
                         } else {
                             let insert_elapsed = insert_started.elapsed();
@@ -635,6 +672,12 @@ async fn process_recording_bg(
         pipeline_started.elapsed().as_millis()
     );
     *state.lock().await = ServerState::Idle;
+}
+
+fn should_emit_openhuman_insert_fallback(expected_app: Option<&str>) -> bool {
+    expected_app
+        .map(|name| name.to_ascii_lowercase().contains("openhuman"))
+        .unwrap_or(false)
 }
 
 /// Global voice server instance, lazily initialized.
