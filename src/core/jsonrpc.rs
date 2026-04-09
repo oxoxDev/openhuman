@@ -703,6 +703,21 @@ async fn run_server_inner(
                 // Initialize screen intelligence engine if enabled in config.
                 crate::openhuman::screen_intelligence::server::start_if_enabled(&config).await;
                 crate::openhuman::autocomplete::start_if_enabled(&config).await;
+
+                // Register autocomplete shutdown hook so the engine (and its
+                // Swift overlay helper) are stopped cleanly on process exit.
+                crate::core::shutdown::register(|| async {
+                    let engine = crate::openhuman::autocomplete::global_engine();
+                    let status = engine.status().await;
+                    if status.running {
+                        log::info!(
+                            "[core] stopping autocomplete engine (phase={})",
+                            status.phase
+                        );
+                        engine.stop(None).await;
+                        log::info!("[core] autocomplete engine stopped");
+                    }
+                });
             }
             Err(err) => {
                 log::warn!("[core] config load failed, skipping local-ai and overlay: {err}");
@@ -722,24 +737,8 @@ async fn run_server_inner(
         }
     });
 
-    let shutdown_signal = async {
-        let _ = tokio::signal::ctrl_c().await;
-        log::info!("[core] shutdown signal received, cleaning up background services");
-
-        let engine = crate::openhuman::autocomplete::global_engine();
-        let status = engine.status().await;
-        if status.running {
-            log::info!(
-                "[core] stopping autocomplete engine (phase={})",
-                status.phase
-            );
-            engine.stop(None).await;
-            log::info!("[core] autocomplete engine stopped");
-        }
-    };
-
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
+        .with_graceful_shutdown(crate::core::shutdown::signal())
         .await?;
     Ok(())
 }
