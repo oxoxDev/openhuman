@@ -722,7 +722,25 @@ async fn run_server_inner(
         }
     });
 
-    axum::serve(listener, app).await?;
+    let shutdown_signal = async {
+        let _ = tokio::signal::ctrl_c().await;
+        log::info!("[core] shutdown signal received, cleaning up background services");
+
+        let engine = crate::openhuman::autocomplete::global_engine();
+        let status = engine.status().await;
+        if status.running {
+            log::info!(
+                "[core] stopping autocomplete engine (phase={})",
+                status.phase
+            );
+            engine.stop(None).await;
+            log::info!("[core] autocomplete engine stopped");
+        }
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
     Ok(())
 }
 
