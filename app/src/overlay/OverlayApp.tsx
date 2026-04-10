@@ -405,7 +405,7 @@ export default function OverlayApp() {
         <div className="relative">
           <button
             type="button"
-            aria-label="Overlay orb"
+            aria-label={mode === 'stt' ? 'Recording speech' : mode === 'attention' ? 'Attention message' : 'OpenHuman overlay'}
             onClick={goIdle}
             onMouseEnter={() => {
               setIsHovered(true);
