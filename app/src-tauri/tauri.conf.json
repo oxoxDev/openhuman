@@ -69,9 +69,7 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "entitlements": "entitlements.sidecar.plist",
-      "infoPlist": {
-        "NSMicrophoneUsageDescription": "OpenHuman uses the microphone for voice dictation — press the hotkey to record speech and transcribe it to text."
-      },
+      "infoPlist": "Info.plist",
       "dmg": {
         "background": "./images/background-dmg.png"
       }

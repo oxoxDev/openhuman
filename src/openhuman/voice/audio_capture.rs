@@ -204,7 +204,7 @@ fn record_on_thread(
             // Re-check after request (macOS may have shown a prompt).
             let updated = detect_microphone_permission();
             debug!("{LOG_PREFIX} microphone permission after request: {updated:?}");
-            if updated == PermissionState::Denied {
+            if matches!(updated, PermissionState::Denied | PermissionState::Unknown) {
                 let msg = microphone_denied_message();
                 error!("{LOG_PREFIX} {msg}");
                 let _ = setup_tx.send(Err(msg.clone()));
