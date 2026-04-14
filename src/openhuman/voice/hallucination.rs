@@ -112,10 +112,7 @@ pub fn is_hallucinated_output(text: &str, mode: HallucinationMode) -> bool {
     // Layer 1: Exact match against known hallucination phrases.
     for pattern in ALWAYS_HALLUCINATION {
         if normalized == *pattern || stripped == *pattern {
-            debug!(
-                "{LOG_PREFIX} exact-match hallucination detected: {:?}",
-                normalized
-            );
+            debug!("{LOG_PREFIX} exact-match hallucination detected");
             return true;
         }
     }
@@ -124,10 +121,7 @@ pub fn is_hallucinated_output(text: &str, mode: HallucinationMode) -> bool {
     if mode == HallucinationMode::Dictation {
         for pattern in DICTATION_ONLY_PATTERNS {
             if normalized == *pattern || stripped == *pattern {
-                debug!(
-                    "{LOG_PREFIX} dictation-only hallucination detected: {:?}",
-                    normalized
-                );
+                debug!("{LOG_PREFIX} dictation-only hallucination detected");
                 return true;
             }
         }
@@ -153,8 +147,7 @@ pub fn is_hallucinated_output(text: &str, mode: HallucinationMode) -> bool {
     let first = &clean_words[0];
     if clean_words.iter().all(|w| w == first) {
         debug!(
-            "{LOG_PREFIX} uniform repetition detected: {:?} ({} repeats)",
-            first,
+            "{LOG_PREFIX} uniform repetition detected (repeats={})",
             clean_words.len()
         );
         return true;
@@ -169,9 +162,8 @@ pub fn is_hallucinated_output(text: &str, mode: HallucinationMode) -> bool {
             let all_match = clean_words.chunks(ngram_len).all(|chunk| chunk == pattern);
             if all_match {
                 debug!(
-                    "{LOG_PREFIX} repeating {}-gram detected: {:?} ({} repeats)",
+                    "{LOG_PREFIX} repeating {}-gram detected ({} repeats)",
                     ngram_len,
-                    pattern,
                     clean_words.len() / ngram_len
                 );
                 return true;
@@ -192,11 +184,8 @@ pub fn is_hallucinated_output(text: &str, mode: HallucinationMode) -> bool {
         let ratio = *count as f64 / total as f64;
         if ratio > 0.6 && *count >= 5 {
             debug!(
-                "{LOG_PREFIX} dominant-word hallucination: {:?} appears {}/{} times ({:.0}%)",
-                word,
-                count,
-                total,
-                ratio * 100.0
+                "{LOG_PREFIX} dominant-word hallucination detected (count={}, total={}, ratio={:.0}%)",
+                count, total, ratio * 100.0
             );
             return true;
         }
