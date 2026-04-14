@@ -3,6 +3,7 @@ compile_error!("src-tauri host is desktop-only. Non-desktop targets are not supp
 
 mod core_process;
 mod core_update;
+mod webview_accounts;
 
 use std::sync::Mutex;
 
@@ -424,6 +425,7 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(DictationHotkeyState(Mutex::new(Vec::new())))
+        .manage(webview_accounts::WebviewAccountsState::default())
         .setup(move |app| {
             #[cfg(any(windows, target_os = "linux"))]
             {
@@ -509,7 +511,13 @@ pub fn run() {
             service_status_direct,
             service_uninstall_direct,
             register_dictation_hotkey,
-            unregister_dictation_hotkey
+            unregister_dictation_hotkey,
+            webview_accounts::webview_account_open,
+            webview_accounts::webview_account_close,
+            webview_accounts::webview_account_bounds,
+            webview_accounts::webview_account_hide,
+            webview_accounts::webview_account_show,
+            webview_accounts::webview_recipe_event
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

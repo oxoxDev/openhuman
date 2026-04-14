@@ -50,6 +50,21 @@ const tabs = [
     ),
   },
   {
+    id: 'accounts',
+    label: 'Accounts',
+    path: '/accounts',
+    icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={1.8}
+          d="M3 7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7zm0 4h18M7 15h4"
+        />
+      </svg>
+    ),
+  },
+  {
     id: 'intelligence',
     label: 'Intelligence',
     path: '/intelligence',

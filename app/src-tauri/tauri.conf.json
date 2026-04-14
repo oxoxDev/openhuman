@@ -60,7 +60,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../../src/openhuman/agent/prompts"
+      "../../src/openhuman/agent/prompts",
+      "recipes/**"
     ],
     "externalBin": [
       "binaries/openhuman-core"

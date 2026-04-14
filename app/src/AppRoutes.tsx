@@ -3,6 +3,7 @@ import { Route, Routes } from 'react-router-dom';
 import DefaultRedirect from './components/DefaultRedirect';
 import ProtectedRoute from './components/ProtectedRoute';
 import PublicRoute from './components/PublicRoute';
+import Accounts from './pages/Accounts';
 import Agents from './pages/Agents';
 import Channels from './pages/Channels';
 import Conversations from './pages/Conversations';
@@ -78,6 +79,15 @@ const AppRoutes = () => {
         element={
           <ProtectedRoute requireAuth={true}>
             <Channels />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/accounts"
+        element={
+          <ProtectedRoute requireAuth={true}>
+            <Accounts />
           </ProtectedRoute>
         }
       />

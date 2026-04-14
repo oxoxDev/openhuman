@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "webview-accounts-recipes",
+  "description": "Permissions for embedded webview-account child webviews. The injected per-provider recipe runtime calls webview_recipe_event from inside untrusted third-party origins (e.g. web.whatsapp.com), so this capability is intentionally scoped to ONLY that one command.",
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": [],
+  "webviews": ["acct_*"],
+  "permissions": ["allow-webview-recipe"]
+}
