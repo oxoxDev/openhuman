@@ -650,7 +650,7 @@ async fn process_recording_bg(
                     );
 
                     // Gate 3: filter hallucinated/blank output.
-                    if is_hallucinated_output(text) {
+                    if is_hallucinated_output(text, HallucinationMode::Dictation) {
                         warn!(
                             "{LOG_PREFIX} [pipeline={pipeline_id}] stage=gate_hallucination DROPPED text='{}'",
                             truncate_for_log(text, 60)
@@ -853,7 +853,7 @@ pub async fn run_standalone(
 }
 
 // Hallucination detection is now in the shared `hallucination` module.
-use super::hallucination::is_hallucinated_output;
+use super::hallucination::{is_hallucinated_output, HallucinationMode};
 
 fn truncate_for_log(s: &str, max: usize) -> String {
     let truncated: String = s.chars().take(max).collect();
@@ -882,37 +882,41 @@ mod tests {
 
     #[test]
     fn hallucination_detection() {
+        use super::HallucinationMode;
+        let mode = HallucinationMode::Dictation;
+
         // Blank audio markers.
-        assert!(is_hallucinated_output("[BLANK_AUDIO]"));
-        assert!(is_hallucinated_output("  [blank_audio]  "));
-        assert!(is_hallucinated_output("[ BLANK_AUDIO ]"));
+        assert!(is_hallucinated_output("[BLANK_AUDIO]", mode));
+        assert!(is_hallucinated_output("  [blank_audio]  ", mode));
+        assert!(is_hallucinated_output("[ BLANK_AUDIO ]", mode));
         // Common hallucinated phrases.
-        assert!(is_hallucinated_output("Thank you for watching"));
-        assert!(is_hallucinated_output("thanks for listening"));
-        assert!(is_hallucinated_output("Thank you."));
-        assert!(is_hallucinated_output("Thank you"));
-        assert!(is_hallucinated_output("Thanks."));
-        assert!(is_hallucinated_output("Bye."));
-        assert!(is_hallucinated_output("Goodbye."));
+        assert!(is_hallucinated_output("Thank you for watching", mode));
+        assert!(is_hallucinated_output("thanks for listening", mode));
+        assert!(is_hallucinated_output("Thank you.", mode));
+        assert!(is_hallucinated_output("Thank you", mode));
+        assert!(is_hallucinated_output("Thanks.", mode));
+        assert!(is_hallucinated_output("Bye.", mode));
+        assert!(is_hallucinated_output("Goodbye.", mode));
         // Repeated words.
-        assert!(is_hallucinated_output("you you you you"));
-        assert!(is_hallucinated_output("the the the the"));
+        assert!(is_hallucinated_output("you you you you", mode));
+        assert!(is_hallucinated_output("the the the the", mode));
         // Punctuation-only.
-        assert!(is_hallucinated_output("..."));
-        assert!(is_hallucinated_output("."));
-        // Single noise words.
-        assert!(is_hallucinated_output("you"));
-        assert!(is_hallucinated_output("Yeah"));
-        assert!(is_hallucinated_output("Hmm"));
-        assert!(is_hallucinated_output("Oh."));
+        assert!(is_hallucinated_output("...", mode));
+        assert!(is_hallucinated_output(".", mode));
+        // Single noise words (dictation mode drops these).
+        assert!(is_hallucinated_output("you", mode));
+        assert!(is_hallucinated_output("Yeah", mode));
+        assert!(is_hallucinated_output("Hmm", mode));
+        assert!(is_hallucinated_output("Oh.", mode));
         // Should NOT flag real speech.
-        assert!(!is_hallucinated_output("Hello, how are you?"));
-        assert!(!is_hallucinated_output("the quick brown fox"));
-        assert!(!is_hallucinated_output("I want to order pizza"));
+        assert!(!is_hallucinated_output("Hello, how are you?", mode));
+        assert!(!is_hallucinated_output("the quick brown fox", mode));
+        assert!(!is_hallucinated_output("I want to order pizza", mode));
         assert!(!is_hallucinated_output(
-            "thank you for your help with the project"
+            "thank you for your help with the project",
+            mode
         ));
-        assert!(!is_hallucinated_output(""));
+        assert!(!is_hallucinated_output("", mode));
     }
 
     #[tokio::test]
