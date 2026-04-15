@@ -64,8 +64,8 @@ const DeviceCapabilitySection = ({
       {presetsData && (
         <div className="space-y-2">
           <div className="rounded-lg border border-primary-200 bg-primary-50 p-3 text-xs text-primary-700">
-            The local AI model is fixed for the MVP release. Broader model options will be
-            available in a future update.
+            The local AI model is fixed for the MVP release. Broader model options will be available
+            in a future update.
           </div>
           {presetsData.presets.map(preset => {
             const isCurrent = preset.tier === presetsData.current_tier;

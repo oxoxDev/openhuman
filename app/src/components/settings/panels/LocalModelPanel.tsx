@@ -87,7 +87,6 @@ const LocalModelPanel = () => {
     }
   };
 
-
   useEffect(() => {
     void loadStatus();
     void loadPresets();
