@@ -133,10 +133,10 @@ readable when multiple scanners run at once.
 
 Two interleaved loops — do **not** run everything on one cadence:
 
-| Tick | Interval | Job | Cost |
-| --- | --- | --- | --- |
-| Fast | 2s | `dom_scan.js` — `[data-id]` rows, body text from visible DOM | ~30 `querySelectorAll`, tiny |
-| Full | 30s | `scanner.js` — all IDB stores, chat names, contact names | 12 DBs × ~500 rows, heavy |
+| Tick | Interval | Job                                                          | Cost                         |
+| ---- | -------- | ------------------------------------------------------------ | ---------------------------- |
+| Fast | 2s       | `dom_scan.js` — `[data-id]` rows, body text from visible DOM | ~30 `querySelectorAll`, tiny |
+| Full | 30s      | `scanner.js` — all IDB stores, chat names, contact names     | 12 DBs × ~500 rows, heavy    |
 
 Cache a hash of the fast-tick output and emit only when it changes:
 
@@ -236,16 +236,16 @@ DOM scraping via `Runtime.evaluate` needs none of the above.
 
 ## Common pitfalls we hit
 
-| Problem | Cause | Fix |
-| --- | --- | --- |
-| Scanner never runs | Wrong Cargo feature | Use `yarn dev:cef`, not `yarn dev` |
-| `helloCount: 0` despite wrapper running | CSP blocks `blob:` workers | Skip the workers entirely — use DOM scrape |
-| 10s-per-worker timeouts | CEF worker targets don't answer CDP Runtime calls | Don't probe workers |
-| `patched=N, appended=N` duplicates | DOM row indexed twice, only one key removed on patch | Track consumed rows by a stable `dataId`, not by map key |
-| Empty `dom-scrape count` after reload | Chat not open yet / page still loading | Scanner polls — next tick picks it up |
-| Memory writes never fire | React listener not attached (user not on `/accounts`) | POST to core RPC directly from Rust |
-| Stale timestamps in transcript | `preTimestamp` from DOM is string like `"4:53 AM, 7/5/2025"` | Parse it; fall back to `now_secs` if unparseable |
-| Raw JIDs in transcript | No contact lookup | Populate `contact_cache` from full-scan chats map |
+| Problem                                 | Cause                                                        | Fix                                                      |
+| --------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------- |
+| Scanner never runs                      | Wrong Cargo feature                                          | Use `yarn dev:cef`, not `yarn dev`                       |
+| `helloCount: 0` despite wrapper running | CSP blocks `blob:` workers                                   | Skip the workers entirely — use DOM scrape               |
+| 10s-per-worker timeouts                 | CEF worker targets don't answer CDP Runtime calls            | Don't probe workers                                      |
+| `patched=N, appended=N` duplicates      | DOM row indexed twice, only one key removed on patch         | Track consumed rows by a stable `dataId`, not by map key |
+| Empty `dom-scrape count` after reload   | Chat not open yet / page still loading                       | Scanner polls — next tick picks it up                    |
+| Memory writes never fire                | React listener not attached (user not on `/accounts`)        | POST to core RPC directly from Rust                      |
+| Stale timestamps in transcript          | `preTimestamp` from DOM is string like `"4:53 AM, 7/5/2025"` | Parse it; fall back to `now_secs` if unparseable         |
+| Raw JIDs in transcript                  | No contact lookup                                            | Populate `contact_cache` from full-scan chats map        |
 
 ---
 
