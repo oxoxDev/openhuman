@@ -310,6 +310,30 @@ pub async fn webview_account_open<R: Runtime>(
         .unwrap()
         .insert(args.account_id.clone(), label.clone());
 
+    // For providers we know how to scrape via CDP, kick off the IndexedDB
+    // scanner. Compile-gated to `cef` because CDP only exists when the CEF
+    // runtime is in use (wry has no remote-debugging port).
+    #[cfg(feature = "cef")]
+    {
+        if args.provider == "whatsapp" {
+            if let Some(prefix) = provider_url(&args.provider) {
+                let registry = app
+                    .try_state::<std::sync::Arc<crate::cdp_indexeddb::ScannerRegistry>>()
+                    .map(|s| s.inner().clone());
+                if let Some(registry) = registry {
+                    let app_clone = app.clone();
+                    let acct = args.account_id.clone();
+                    let prefix = prefix.to_string();
+                    tokio::spawn(async move {
+                        registry.ensure_scanner(app_clone, acct, prefix).await;
+                    });
+                } else {
+                    log::warn!("[webview-accounts] CDP ScannerRegistry not in app state");
+                }
+            }
+        }
+    }
+
     Ok(label)
 }
 
@@ -330,6 +354,16 @@ pub async fn webview_account_close<R: Runtime>(
     if let Some(wv) = app.get_webview(&label) {
         if let Err(e) = wv.close() {
             log::warn!("[webview-accounts] close({label}) failed: {e}");
+        }
+    }
+    #[cfg(feature = "cef")]
+    {
+        if let Some(registry) =
+            app.try_state::<std::sync::Arc<crate::cdp_indexeddb::ScannerRegistry>>()
+        {
+            let registry = registry.inner().clone();
+            let acct = args.account_id.clone();
+            tokio::spawn(async move { registry.forget(&acct).await });
         }
     }
     log::info!("[webview-accounts] closed label={}", label);

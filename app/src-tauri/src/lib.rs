@@ -1,6 +1,8 @@
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 compile_error!("src-tauri host is desktop-only. Non-desktop targets are not supported.");
 
+#[cfg(feature = "cef")]
+mod cdp_indexeddb;
 mod core_process;
 mod core_update;
 mod webview_accounts;
@@ -456,29 +458,27 @@ pub fn run() {
         // "Inspect" does not work on CEF child webviews on macOS, so this
         // is the only reliable way to inspect IndexedDB / console / storage
         // for the embedded WhatsApp/Slack/etc. webviews.
-        //
-        // `disable-web-security` turns off same-origin / CSP enforcement so
-        // our injected recipe scripts can round-trip through Tauri's IPC
-        // from inside third-party origins (web.whatsapp.com ships a strict
-        // `connect-src` that otherwise blocks the IPC fetch, dropping every
-        // api.log/ingest call). Safe here because every child webview is
-        // already a dedicated session we fully control — there's no user
-        // content being served cross-origin into our surface.
+        // NOTE: flags must be prefixed with `--`. The runtime's
+        // `on_before_command_line_processing` dispatch (in
+        // `tauri-runtime-cef/src/cef_impl.rs`) routes value-less args that
+        // don't start with `-` to `append_argument` (positional) instead of
+        // `append_switch`, which means Chromium silently ignores them.
         .command_line_args::<&str, &str>([
-            ("use-mock-keychain", None),
-            ("password-store", Some("basic")),
-            ("remote-debugging-port", Some("9222")),
-            ("remote-allow-origins", Some("*")),
-            ("disable-web-security", None),
-            ("disable-site-isolation-trials", None),
+            ("--use-mock-keychain", None),
+            ("--password-store", Some("basic")),
+            ("--remote-debugging-port", Some("9222")),
+            ("--remote-allow-origins", Some("*")),
         ]);
 
-    builder
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(DictationHotkeyState(Mutex::new(Vec::new())))
-        .manage(webview_accounts::WebviewAccountsState::default())
+        .manage(webview_accounts::WebviewAccountsState::default());
+    #[cfg(feature = "cef")]
+    let builder = builder.manage(cdp_indexeddb::ScannerRegistry::new());
+    builder
         .setup(move |app| {
             #[cfg(any(windows, target_os = "linux"))]
             {
