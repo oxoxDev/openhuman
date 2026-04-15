@@ -407,10 +407,7 @@ export default function OverlayApp() {
     try {
       const appWindow = getCurrentWindow();
       const pos = await appWindow.outerPosition();
-      localStorage.setItem(
-        OVERLAY_POSITION_KEY,
-        JSON.stringify({ x: pos.x, y: pos.y }),
-      );
+      localStorage.setItem(OVERLAY_POSITION_KEY, JSON.stringify({ x: pos.x, y: pos.y }));
       userDraggedRef.current = true;
     } catch {
       // position read failed — ignore
@@ -438,7 +435,7 @@ export default function OverlayApp() {
         // startDragging can fail if not supported — fall through silently
       }
     },
-    [persistPosition],
+    [persistPosition]
   );
 
   useEffect(() => {
@@ -453,8 +450,16 @@ export default function OverlayApp() {
       // Remove all size constraints first, then set the new size, then
       // re-apply constraints. This avoids the ordering problem where the
       // old min/max clamps the new size.
-      try { await appWindow.setMinSize(null); } catch { /* ignore */ }
-      try { await appWindow.setMaxSize(null); } catch { /* ignore */ }
+      try {
+        await appWindow.setMinSize(null);
+      } catch {
+        /* ignore */
+      }
+      try {
+        await appWindow.setMaxSize(null);
+      } catch {
+        /* ignore */
+      }
       try {
         await appWindow.setSize(size);
       } catch (error) {
@@ -462,12 +467,31 @@ export default function OverlayApp() {
       }
       console.debug(`[overlay] resized to ${width}x${height} (active=${isActive})`);
       // Lock to exact size so the user can't accidentally resize
-      try { await appWindow.setMinSize(size); } catch { /* ignore */ }
-      try { await appWindow.setMaxSize(size); } catch { /* ignore */ }
+      try {
+        await appWindow.setMinSize(size);
+      } catch {
+        /* ignore */
+      }
+      try {
+        await appWindow.setMaxSize(size);
+      } catch {
+        /* ignore */
+      }
 
-      // If the user has dragged the overlay, keep their position
+      // Restore saved position from a previous drag
       const saved = localStorage.getItem(OVERLAY_POSITION_KEY);
-      if (saved || userDraggedRef.current) {
+      if (saved) {
+        try {
+          const { x, y } = JSON.parse(saved) as { x: number; y: number };
+          await appWindow.setPosition(new LogicalPosition(x, y));
+          userDraggedRef.current = true;
+          return;
+        } catch {
+          localStorage.removeItem(OVERLAY_POSITION_KEY);
+        }
+      }
+
+      if (userDraggedRef.current) {
         return;
       }
 
