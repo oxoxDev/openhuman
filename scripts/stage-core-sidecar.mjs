@@ -99,8 +99,12 @@ if (process.platform === "darwin") {
   );
   if (check.stdout && check.stdout.includes(DEV_IDENTITY)) {
     const signResult = spawnSync("codesign", ["--force", "--sign", DEV_IDENTITY, "--timestamp=none", dest], { cwd: root, stdio: "inherit", shell: false });
+    const isCI = process.env.CI === "true" || process.env.CI === "1";
     if (signResult.status === 0) {
       console.log(`[core:stage] Signed sidecar with "${DEV_IDENTITY}"`);
+    } else if (isCI) {
+      console.error(`[core:stage] Dev signing failed (status ${signResult.status}) in CI — aborting.`);
+      process.exit(signResult.status ?? 1);
     } else {
       console.warn(`[core:stage] Dev signing failed (status ${signResult.status}), continuing without stable signing.`);
     }
