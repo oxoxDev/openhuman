@@ -78,15 +78,21 @@ pub struct ScanSnapshot {
     /// Where each CryptoKey was found, in priority order.
     #[serde(rename = "keySources", default)]
     pub key_sources: Vec<String>,
-    /// Top-level shape of the first raw message record (debug).
-    #[serde(rename = "firstMessageShape", default)]
-    pub first_message_shape: Option<Value>,
-    /// Top-level shape of the first message *after* decryption (debug).
-    #[serde(rename = "firstMessageDecrypted", default)]
-    pub first_message_decrypted: Option<Value>,
-    /// First-record shape per "interesting" store name (substring match on
-    /// message/comment/mutation/history/info/orphan/note). Used to find
-    /// whichever store actually carries the message body.
+    /// Union of all top-level field names observed across every message
+    /// record, with the type signature(s) seen for each. Surfaces fields
+    /// like `body` that only appear on certain message types.
+    #[serde(rename = "messageKeyUnion", default)]
+    pub message_key_union: Option<Value>,
+    /// `type → count` over every scanned message — tells us at a glance
+    /// how many text vs media vs system messages we actually have.
+    #[serde(rename = "messageTypeBreakdown", default)]
+    pub message_type_breakdown: Option<Value>,
+    /// `type → shape(firstRecord)` so we can see one full example per
+    /// message type rather than just the first record overall.
+    #[serde(rename = "sampleByType", default)]
+    pub sample_by_type: Option<Value>,
+    /// First-record shape per "interesting" store name (excluding `message`
+    /// itself, which has its own dedicated diagnostics above).
     #[serde(rename = "schemaDump", default)]
     pub schema_dump: serde_json::Map<String, Value>,
     /// OPFS listing — WhatsApp may persist bodies in a SQLite-via-WASM
@@ -124,11 +130,18 @@ pub fn spawn_scanner<R: Runtime>(app: AppHandle<R>, account_id: String, url_pref
                         snap.key_count,
                         snap.key_sources,
                     );
-                    if let Some(ref shape) = snap.first_message_shape {
-                        log::info!("[cdp][{}] first-msg-raw {}", account_id, shape);
+                    if let Some(ref types) = snap.message_type_breakdown {
+                        log::info!("[cdp][{}] msg-types {}", account_id, types);
                     }
-                    if let Some(ref shape) = snap.first_message_decrypted {
-                        log::info!("[cdp][{}] first-msg-dec {}", account_id, shape);
+                    if let Some(ref union) = snap.message_key_union {
+                        log::info!("[cdp][{}] msg-key-union {}", account_id, union);
+                    }
+                    if let Some(ref by_type) = snap.sample_by_type {
+                        if let Some(map) = by_type.as_object() {
+                            for (t, shape) in map {
+                                log::info!("[cdp][{}] msg-shape type={} {}", account_id, t, shape);
+                            }
+                        }
                     }
                     for (store, shape) in &snap.schema_dump {
                         log::info!("[cdp][{}] schema {} {}", account_id, store, shape);

@@ -28,17 +28,18 @@
     storeMap: {}, // dbName → [storeName, ...]
     keyCount: 0, // total CryptoKeys discovered (across all DBs/stores)
     keySources: [], // [dbName/storeName, ...] where keys were found
-    firstMessageShape: null, // top-level shape of first raw message record (debug)
-    firstMessageDecrypted: null, // decrypted shape of first message (debug)
-    // Schema dump: first raw record from each store whose name contains
-    // "message"/"comment"/"note"/"mutation"/"history"/"info" — used to
-    // hunt for whichever store actually carries the body field.
-    schemaDump: {}, // "db/store" → shape
+    // Union of all top-level keys observed across N sampled message records
+    // — different message types (text/media/sticker/etc) use different
+    // subsets of fields, so first-record-only shape was misleading.
+    messageKeyUnion: null,
+    messageTypeBreakdown: null, // { type: count }
+    sampleByType: null, // { type: shapeOf(firstRecordOfThatType) }
+    schemaDump: {}, // "db/store" → first row shape (for non-message stores of interest)
     opfs: null, // { ok, files: [...] } — origin-private filesystem listing
   };
   const SAMPLE_COUNT = 5;
   const SAMPLE_BODY_PREVIEW = 120;
-  const SCHEMA_DUMP_PATTERNS = ['message', 'comment', 'note', 'mutation', 'history', 'info', 'orphan'];
+  const SCHEMA_DUMP_PATTERNS = ['comment', 'note', 'mutation', 'history', 'info', 'pinned'];
 
   // Exact (db, store) targets — discovered from a full store-map dump:
   //   model-storage/message  → message records
@@ -271,6 +272,12 @@
 
     const chatNames = new Map();
     const seen = new Set();
+    // Union of every key seen across message records, with the type
+    // signature observed for each. Lets us spot a `body`/`text`/`content`
+    // field that only appears on text messages.
+    const msgKeyUnion = new Map(); // fieldName -> Set<typeSignature>
+    const msgTypeCounts = new Map(); // type -> count
+    const msgSampleByType = new Map(); // type -> first record's shape
 
     // Try each key in priority order until decryption yields a different
     // (richer) result. Returns the best-effort decrypted value.
@@ -337,11 +344,30 @@
             value = await decryptWithBestKey(raw);
           }
 
-          // Diagnostics: capture the first record from each interesting
-          // store so we can see encrypted vs plain shapes side-by-side.
-          if (isMsg && !out.firstMessageShape) {
-            out.firstMessageShape = { store: info.name + '/' + storeName, shape: shapeOf(raw) };
-            out.firstMessageDecrypted = { shape: shapeOf(value), unchanged: value === raw };
+          // Diagnostics: union the keys seen across every message record
+          // and stash one full shape per `type`. With ~280 records spread
+          // across text/media/sticker/system/etc, this surfaces fields
+          // (like `body`) that only ever appear on text messages.
+          if (isMsg && value && typeof value === 'object') {
+            const t = (value.type && String(value.type)) || '<no-type>';
+            msgTypeCounts.set(t, (msgTypeCounts.get(t) || 0) + 1);
+            if (!msgSampleByType.has(t)) {
+              msgSampleByType.set(t, shapeOf(value));
+            }
+            for (const k of Object.keys(value)) {
+              const x = value[k];
+              let sig;
+              if (x == null) continue; // ignore undefined/null fields
+              if (x instanceof Uint8Array) sig = 'Uint8Array';
+              else if (x instanceof ArrayBuffer) sig = 'ArrayBuffer';
+              else if (ArrayBuffer.isView(x)) sig = x.constructor.name;
+              else if (Array.isArray(x)) sig = 'Array';
+              else if (typeof CryptoKey !== 'undefined' && x instanceof CryptoKey) sig = 'CryptoKey';
+              else if (typeof x === 'object') sig = 'Object';
+              else sig = typeof x;
+              if (!msgKeyUnion.has(k)) msgKeyUnion.set(k, new Set());
+              msgKeyUnion.get(k).add(sig);
+            }
           }
 
           if (isChat) {
@@ -368,6 +394,19 @@
       try { db.close(); } catch (_) {}
     }
     chatNames.forEach((v, k) => { out.chats[k] = v; });
+
+    // Serialise message-key union + per-type sample for the log.
+    {
+      const union = {};
+      msgKeyUnion.forEach((sigSet, name) => { union[name] = Array.from(sigSet).sort().join('|'); });
+      out.messageKeyUnion = union;
+      const types = {};
+      msgTypeCounts.forEach((count, t) => { types[t] = count; });
+      out.messageTypeBreakdown = types;
+      const byType = {};
+      msgSampleByType.forEach((shape, t) => { byType[t] = shape; });
+      out.sampleByType = byType;
+    }
 
     // Pick the N most-recent messages that actually have a body so the
     // Rust log can print real plaintext (proof that decryption worked).
