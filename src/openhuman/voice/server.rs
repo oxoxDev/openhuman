@@ -142,15 +142,18 @@ impl VoiceServer {
         // Also replace the cancellation token with a fresh one — a cancelled
         // token cannot be reused (stop() cancels it permanently).
         let cancel = {
+            // Lock cancel FIRST, then state — same order as stop() — to
+            // prevent a race where stop() cancels the old token between
+            // setting Idle and swapping the token.
+            let mut cancel_guard = self.cancel.lock().await;
             let mut state = self.state.lock().await;
             if *state != ServerState::Stopped {
                 return Err(format!("voice server already running (state={:?})", *state));
             }
-            *state = ServerState::Idle;
 
             let fresh = CancellationToken::new();
-            let mut cancel_guard = self.cancel.lock().await;
             *cancel_guard = fresh.clone();
+            *state = ServerState::Idle;
             fresh
         };
 
