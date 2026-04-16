@@ -156,8 +156,10 @@ fn open_in_system_browser(url: &str) {
 
 /// Human-readable label used as the title prefix on native notifications
 /// so users can tell which provider fired the ping. Matches the labels
-/// in the frontend `PROVIDERS` registry.
-fn provider_display_name(provider: &str) -> &'static str {
+/// in the frontend `PROVIDERS` registry. Public because the CDP-based
+/// `notification_scanner` formats the same prefix for its OS notifications.
+#[cfg(feature = "cef")]
+pub fn provider_display_name(provider: &str) -> &'static str {
     match provider {
         "whatsapp" => "WhatsApp",
         "telegram" => "Telegram",
@@ -202,19 +204,6 @@ pub struct BoundsArgs {
 #[derive(Debug, Deserialize)]
 pub struct AccountIdArgs {
     pub account_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SuggestionArgs {
-    pub account_id: String,
-    pub composer_id: String,
-    pub text: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ComposerActionArgs {
-    pub account_id: String,
-    pub composer_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,6 +482,36 @@ pub async fn webview_account_open<R: Runtime>(
                 }
             }
         }
+
+        // Browser Notification interception runs for every provider —
+        // the CDP scanner installs a tiny `__openhumanNotify` binding and
+        // patches `window.Notification` at the renderer level, so every
+        // webapp's push pings surface as native OS notifications without
+        // any JS injection from our side.
+        if let Some(prefix) = provider_url(&args.provider) {
+            // Discord's default URL carries `/channels/@me`; strip that so
+            // the scanner matches subsequent in-app navigations too.
+            let prefix = prefix
+                .split_once("/channels")
+                .map(|(host, _)| host)
+                .unwrap_or(prefix);
+            let registry = app
+                .try_state::<std::sync::Arc<crate::notification_scanner::ScannerRegistry>>()
+                .map(|s| s.inner().clone());
+            if let Some(registry) = registry {
+                let app_clone = app.clone();
+                let acct = args.account_id.clone();
+                let provider = args.provider.clone();
+                let prefix = prefix.to_string();
+                tokio::spawn(async move {
+                    registry
+                        .ensure_scanner(app_clone, acct, provider, prefix)
+                        .await;
+                });
+            } else {
+                log::warn!("[webview-accounts] notification ScannerRegistry not in app state");
+            }
+        }
     }
 
     Ok(label)
@@ -535,6 +554,13 @@ pub async fn webview_account_close<R: Runtime>(
         }
         if let Some(registry) =
             app.try_state::<std::sync::Arc<crate::discord_scanner::ScannerRegistry>>()
+        {
+            let registry = registry.inner().clone();
+            let acct = args.account_id.clone();
+            tokio::spawn(async move { registry.forget(&acct).await });
+        }
+        if let Some(registry) =
+            app.try_state::<std::sync::Arc<crate::notification_scanner::ScannerRegistry>>()
         {
             let registry = registry.inner().clone();
             let acct = args.account_id.clone();
@@ -584,6 +610,13 @@ pub async fn webview_account_purge<R: Runtime>(
         }
         if let Some(registry) =
             app.try_state::<std::sync::Arc<crate::discord_scanner::ScannerRegistry>>()
+        {
+            let registry = registry.inner().clone();
+            let acct = args.account_id.clone();
+            tokio::spawn(async move { registry.forget(&acct).await });
+        }
+        if let Some(registry) =
+            app.try_state::<std::sync::Arc<crate::notification_scanner::ScannerRegistry>>()
         {
             let registry = registry.inner().clone();
             let acct = args.account_id.clone();
@@ -689,92 +722,6 @@ fn resolve_webview<R: Runtime>(
         .ok_or_else(|| format!("webview {label} missing (stale state)"))
 }
 
-/// JS-string-escape a Rust `&str` for safe interpolation into a string
-/// literal inside an `eval()` payload. We can't use serde_json::to_string
-/// for the suggestion text alone because we need to slot it into a single
-/// JS expression — wrapping the whole arg list as JSON keeps escaping
-/// trustworthy across newlines, quotes, and unicode.
-fn build_invoke_recipe(method: &str, args: &[serde_json::Value]) -> Result<String, String> {
-    let serialized = args
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("serialize args: {e}"))?
-        .join(", ");
-    Ok(format!(
-        "(function(){{ try {{ if (window.__openhumanRecipe && typeof window.__openhumanRecipe.{m} === 'function') {{ window.__openhumanRecipe.{m}({a}); }} }} catch (e) {{ console.error('[openhuman] {m} failed', e); }} }})();",
-        m = method,
-        a = serialized,
-    ))
-}
-
-/// Push a ghost-text suggestion into a composer the recipe has registered
-/// via `__openhumanRecipe.attachComposer(...)`. The user accepts with Tab
-/// (or whatever `suggestionKey` the recipe attached with).
-#[tauri::command]
-pub async fn webview_account_set_suggestion<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, WebviewAccountsState>,
-    args: SuggestionArgs,
-) -> Result<(), String> {
-    let wv = resolve_webview(&app, &state, &args.account_id)?;
-    let js = build_invoke_recipe(
-        "setSuggestion",
-        &[
-            serde_json::Value::String(args.composer_id.clone()),
-            serde_json::Value::String(args.text.clone()),
-        ],
-    )?;
-    log::debug!(
-        "[webview-accounts] set_suggestion account={} composer={} len={}",
-        args.account_id,
-        args.composer_id,
-        args.text.chars().count()
-    );
-    wv.eval(&js).map_err(|e| format!("eval failed: {e}"))
-}
-
-/// Clear the active ghost suggestion in a composer.
-#[tauri::command]
-pub async fn webview_account_clear_suggestion<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, WebviewAccountsState>,
-    args: ComposerActionArgs,
-) -> Result<(), String> {
-    let wv = resolve_webview(&app, &state, &args.account_id)?;
-    let js = build_invoke_recipe(
-        "clearSuggestion",
-        &[serde_json::Value::String(args.composer_id.clone())],
-    )?;
-    log::debug!(
-        "[webview-accounts] clear_suggestion account={} composer={}",
-        args.account_id,
-        args.composer_id
-    );
-    wv.eval(&js).map_err(|e| format!("eval failed: {e}"))
-}
-
-/// Programmatically commit (insert) the active suggestion as if the user
-/// pressed Tab. Useful for "accept" buttons in the host UI.
-#[tauri::command]
-pub async fn webview_account_commit_suggestion<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, WebviewAccountsState>,
-    args: ComposerActionArgs,
-) -> Result<(), String> {
-    let wv = resolve_webview(&app, &state, &args.account_id)?;
-    let js = build_invoke_recipe(
-        "commitSuggestion",
-        &[serde_json::Value::String(args.composer_id.clone())],
-    )?;
-    log::debug!(
-        "[webview-accounts] commit_suggestion account={} composer={}",
-        args.account_id,
-        args.composer_id
-    );
-    wv.eval(&js).map_err(|e| format!("eval failed: {e}"))
-}
-
 /// Generic eval escape hatch — runs `js` inside the account's webview.
 /// Prefer the typed commands above; only use this for one-off recipe
 /// helpers or debugging.
@@ -827,41 +774,6 @@ pub async fn webview_recipe_event<R: Runtime>(
             direction,
             size
         );
-    } else if args.kind == "composer_input" {
-        let composer = args
-            .payload
-            .get("composerId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let len = args
-            .payload
-            .get("text")
-            .and_then(|v| v.as_str())
-            .map(|s| s.chars().count())
-            .unwrap_or(0);
-        log::debug!(
-            "[webview-accounts][{}] composer_input id={} chars={}",
-            args.account_id,
-            composer,
-            len
-        );
-    } else if args.kind == "composer_commit" {
-        let composer = args
-            .payload
-            .get("composerId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let source = args
-            .payload
-            .get("source")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        log::info!(
-            "[webview-accounts][{}] composer_commit id={} source={}",
-            args.account_id,
-            composer,
-            source
-        );
     } else if args.kind == "log" {
         let level = args
             .payload
@@ -877,53 +789,6 @@ pub async fn webview_recipe_event<R: Runtime>(
             "warn" => log::warn!("[webview-accounts][{}] {}", args.account_id, msg),
             "error" => log::error!("[webview-accounts][{}] {}", args.account_id, msg),
             _ => log::info!("[webview-accounts][{}] {}", args.account_id, msg),
-        }
-    } else if args.kind == "notify" {
-        // MITM'd push notification from the embedded webview — re-emit it
-        // as an OS-native notification so the user sees it even when the
-        // OpenHuman window is not focused. Source is either "window"
-        // (main-thread `new Notification(...)`) or "sw" (service worker
-        // page-initiated `registration.showNotification(...)`).
-        use tauri_plugin_notification::NotificationExt;
-        let raw_title = args
-            .payload
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let body = args
-            .payload
-            .get("options")
-            .and_then(|v| v.get("body"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let source = args
-            .payload
-            .get("source")
-            .and_then(|v| v.as_str())
-            .unwrap_or("window");
-        let provider_label = provider_display_name(&args.provider);
-        let notify_title = if raw_title.is_empty() {
-            provider_label.to_string()
-        } else {
-            format!("{} — {}", provider_label, raw_title)
-        };
-        log::info!(
-            "[webview-accounts][{}] notify source={} title={:?} body_chars={}",
-            args.account_id,
-            source,
-            raw_title,
-            body.chars().count()
-        );
-        let mut builder = app.notification().builder().title(&notify_title);
-        if !body.is_empty() {
-            builder = builder.body(body);
-        }
-        if let Err(e) = builder.show() {
-            log::warn!(
-                "[webview-accounts][{}] notification show failed: {}",
-                args.account_id,
-                e
-            );
         }
     }
 

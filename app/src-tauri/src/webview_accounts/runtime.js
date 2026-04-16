@@ -14,6 +14,7 @@
 //   ws_message       { direction:'in'|'out', kind, data, url, size, ts }
 //   ws_open          { url, ts }
 //   ws_close         { url, code, reason, ts }
+//   <custom>         arbitrary — recipes can push any kind via api.emit(kind, payload)
 //
 // Browser push notifications are NOT handled here — they're intercepted
 // at the CDP level in `notification_scanner` (feature=cef only).
@@ -183,6 +184,14 @@
     },
     log(level, msg) {
       send('log', { level: level || 'info', msg: String(msg) });
+    },
+    /** Push an arbitrary event kind up to Rust. Recipe-specific events
+     *  (e.g. `meet_call_started`, `slack_thread_open`) go through here —
+     *  the host side just sees another `webview:event` envelope with
+     *  the given `kind`. No-ops if `kind` is falsy. */
+    emit(kind, payload) {
+      if (!kind) return;
+      send(String(kind), payload || {});
     },
     context() {
       return Object.assign({}, ctx);

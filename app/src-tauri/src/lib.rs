@@ -7,6 +7,8 @@ mod whatsapp_scanner;
 mod slack_scanner;
 #[cfg(feature = "cef")]
 mod discord_scanner;
+#[cfg(feature = "cef")]
+mod notification_scanner;
 mod core_process;
 mod core_update;
 mod webview_accounts;
@@ -545,6 +547,8 @@ pub fn run() {
     let builder = builder.manage(slack_scanner::ScannerRegistry::new());
     #[cfg(feature = "cef")]
     let builder = builder.manage(discord_scanner::ScannerRegistry::new());
+    #[cfg(feature = "cef")]
+    let builder = builder.manage(notification_scanner::ScannerRegistry::new());
     builder
         .setup(move |app| {
             #[cfg(any(windows, target_os = "linux"))]
@@ -730,9 +734,6 @@ pub fn run() {
             webview_accounts::webview_account_hide,
             webview_accounts::webview_account_show,
             webview_accounts::webview_recipe_event,
-            webview_accounts::webview_account_set_suggestion,
-            webview_accounts::webview_account_clear_suggestion,
-            webview_accounts::webview_account_commit_suggestion,
             webview_accounts::webview_account_eval
         ])
         .build(tauri::generate_context!())
