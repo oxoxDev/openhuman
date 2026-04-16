@@ -465,10 +465,7 @@ async fn flush_thinking_message(channel: &str, state: &mut StreamingState) {
     if let Some(ref msg_id) = state.thinking_message_id {
         // Edit existing thinking message with updated content.
         let body = json!({ "text": text });
-        if let Err(err) = client
-            .send_channel_edit(channel, msg_id, &jwt, body)
-            .await
-        {
+        if let Err(err) = client.send_channel_edit(channel, msg_id, &jwt, body).await {
             tracing::debug!(
                 "[channel-inbound][thinking] edit failed channel='{}' msg_id={} err={}",
                 channel,
@@ -517,10 +514,7 @@ async fn delete_channel_message(channel: &str, message_id: &str) {
     let Some((client, jwt)) = build_channel_client().await else {
         return;
     };
-    match client
-        .send_channel_delete(channel, message_id, &jwt)
-        .await
-    {
+    match client.send_channel_delete(channel, message_id, &jwt).await {
         Ok(_) => {
             tracing::info!(
                 "[channel-inbound] deleted ephemeral msg channel='{}' msg_id={}",
