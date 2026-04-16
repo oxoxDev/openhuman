@@ -139,12 +139,10 @@ impl EventHandler for ChannelInboundSubscriber {
                                     }
                                 }
                                 "thinking_delta" => {
-                                    // Thinking deltas are internal LLM reasoning
-                                    // and must NOT be forwarded to channels.
-                                    // Previously they were accumulated and sent
-                                    // as a separate "💭 Thinking:" message, which
-                                    // persisted in the chat alongside the final
-                                    // response (#600).
+                                    if let Some(delta) = ev.delta.as_ref() {
+                                        streaming_state.thinking_accumulator.push_str(delta);
+                                        streaming_state.thinking_dirty = true;
+                                    }
                                 }
                                 "chat_done" | "chat:done" => {
                                     let reply = ev.full_response.unwrap_or_default();
@@ -200,6 +198,9 @@ impl EventHandler for ChannelInboundSubscriber {
                     }
                 }
                 _ = edit_timer.tick() => {
+                    if streaming_state.thinking_dirty {
+                        flush_thinking_message(channel, &mut streaming_state).await;
+                    }
                     if streaming_state.dirty && !streaming_state.edit_disabled {
                         flush_streaming_edit(channel, &mut streaming_state).await;
                     }
@@ -264,6 +265,17 @@ struct StreamingState {
     /// Latched when the backend doesn't support edits for this channel
     /// — we stop trying and rely on the final atomic send.
     edit_disabled: bool,
+    /// Accumulated LLM reasoning from `thinking_delta` events. Shown
+    /// to the user as an ephemeral "💭 Thinking…" message that is
+    /// **deleted** once the final response is ready (#600).
+    thinking_accumulator: String,
+    /// Backend-assigned id of the ephemeral thinking message. Used to
+    /// delete it at finalization so the user sees only the clean reply.
+    thinking_message_id: Option<String>,
+    /// `true` once a thinking message has been posted to the channel.
+    thinking_sent: bool,
+    /// New thinking content has arrived since the last thinking flush.
+    thinking_dirty: bool,
 }
 
 /// Typing-indicator bookkeeping. One per in-flight turn. Latches
@@ -425,6 +437,108 @@ async fn flush_streaming_edit(channel: &str, state: &mut StreamingState) {
     }
 }
 
+/// Maximum length of the thinking snippet shown in the ephemeral
+/// channel message. Longer reasoning is truncated with "…" to avoid
+/// overwhelming the chat.
+const MAX_THINKING_DISPLAY_CHARS: usize = 500;
+
+/// Send or edit the ephemeral "💭 Thinking…" message on the channel.
+/// This message is deleted when the final response is ready.
+async fn flush_thinking_message(channel: &str, state: &mut StreamingState) {
+    state.thinking_dirty = false;
+
+    if state.thinking_accumulator.trim().is_empty() {
+        return;
+    }
+
+    let mut snippet = state.thinking_accumulator.trim().to_string();
+    if snippet.len() > MAX_THINKING_DISPLAY_CHARS {
+        snippet.truncate(MAX_THINKING_DISPLAY_CHARS);
+        snippet.push('…');
+    }
+    let text = format!("💭 _{snippet}_");
+
+    let Some((client, jwt)) = build_channel_client().await else {
+        return;
+    };
+
+    if let Some(ref msg_id) = state.thinking_message_id {
+        // Edit existing thinking message with updated content.
+        let body = json!({ "text": text });
+        if let Err(err) = client
+            .send_channel_edit(channel, msg_id, &jwt, body)
+            .await
+        {
+            tracing::debug!(
+                "[channel-inbound][thinking] edit failed channel='{}' msg_id={} err={}",
+                channel,
+                msg_id,
+                err,
+            );
+        }
+    } else {
+        // Send initial thinking message.
+        let body = json!({ "text": text });
+        match client.send_channel_message(channel, &jwt, body).await {
+            Ok(resp) => {
+                state.thinking_sent = true;
+                let id = resp
+                    .get("id")
+                    .or_else(|| resp.get("data").and_then(|d| d.get("id")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(id) = id {
+                    tracing::debug!(
+                        "[channel-inbound][thinking] thinking msg sent channel='{}' msg_id={}",
+                        channel,
+                        id,
+                    );
+                    state.thinking_message_id = Some(id);
+                } else {
+                    tracing::debug!(
+                        "[channel-inbound][thinking] thinking msg sent but no id returned — will not be deletable",
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "[channel-inbound][thinking] failed to send thinking msg channel='{}' err={}",
+                    channel,
+                    err,
+                );
+            }
+        }
+    }
+}
+
+/// Delete a previously sent message from the channel. Used to clean
+/// up ephemeral thinking messages once the final response is ready.
+async fn delete_channel_message(channel: &str, message_id: &str) {
+    let Some((client, jwt)) = build_channel_client().await else {
+        return;
+    };
+    match client
+        .send_channel_delete(channel, message_id, &jwt)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                "[channel-inbound] deleted ephemeral msg channel='{}' msg_id={}",
+                channel,
+                message_id,
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[channel-inbound] failed to delete ephemeral msg channel='{}' msg_id={} err={}",
+                channel,
+                message_id,
+                err,
+            );
+        }
+    }
+}
+
 /// Deliver the final canonical reply.
 ///
 /// **Invariant**: if a draft message has already been posted to the
@@ -435,6 +549,13 @@ async fn flush_streaming_edit(channel: &str, state: &mut StreamingState) {
 /// creates a fresh outbound message is when no draft has been posted
 /// at all.
 async fn finalize_channel_reply(channel: &str, state: &mut StreamingState, final_text: &str) {
+    // ── Clean up ephemeral thinking message ──────────────────────
+    // Delete the "💭 Thinking…" message so the user only sees the
+    // clean final response (#600).
+    if let Some(ref thinking_id) = state.thinking_message_id {
+        delete_channel_message(channel, thinking_id).await;
+    }
+
     if let Some(ref message_id) = state.message_id {
         // We committed to a draft earlier in the turn. Always attempt
         // to edit it with the canonical reply, even when we'd
