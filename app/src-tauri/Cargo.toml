@@ -112,6 +112,8 @@ tauri-plugin-deep-link = { git = "https://github.com/tauri-apps/plugins-workspac
 tauri-plugin-global-shortcut = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
 tauri-plugin-notification = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
 
+cef-dll-sys = { git = "https://github.com/tauri-apps/cef-rs", branch = "fix/146-location-windows" }
+
 # Fast CI builds: trade runtime perf for compile speed
 [profile.ci]
 inherits = "release"
