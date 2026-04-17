@@ -265,32 +265,28 @@ impl LocalAiService {
 }
 
 fn config_with_recommended_tier_if_unselected(config: &Config, device: &DeviceProfile) -> Config {
-    let selected_tier = config
-        .local_ai
-        .selected_tier
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
     let current_tier =
         crate::openhuman::local_ai::presets::current_tier_from_config(&config.local_ai);
 
-    // Local AI is opt-in. When the user has *not* explicitly picked a tier,
-    // default to disabled (cloud fallback) regardless of device RAM. The user
-    // can still opt in via onboarding or Settings. This is the MVP behavior:
-    // all users start on cloud and must explicitly turn local AI on.
-    if selected_tier.is_none() {
+    // Local AI is opt-in on every device. The only way to keep it enabled
+    // across a restart is an explicit opt-in (`apply_preset` on a real tier),
+    // which sets `opt_in_confirmed = true`. Every other state — fresh install,
+    // pre-MVP upgrade with a stale `selected_tier`, manual config edit — is
+    // hard-overridden to disabled here, regardless of device RAM.
+    if !config.local_ai.opt_in_confirmed {
         tracing::debug!(
             total_ram_gb = device.total_ram_gb(),
             min_required_gb = crate::openhuman::local_ai::presets::MIN_RAM_GB_FOR_LOCAL_AI,
             ?current_tier,
-            "[local_ai] bootstrap: no tier selected, defaulting to disabled (opt-in cloud fallback)"
+            selected_tier = ?config.local_ai.selected_tier,
+            "[local_ai] bootstrap: opt_in_confirmed=false, hard-overriding to disabled (cloud fallback)"
         );
         let mut effective_config = config.clone();
         effective_config.local_ai.enabled = false;
         return effective_config;
     }
 
-    // User has already picked a tier (explicit selection). Honor it as-is.
+    // User has explicitly opted in via apply_preset. Honor the config as-is.
     config.clone()
 }
 
@@ -383,9 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_respects_explicit_tier_on_low_ram_device() {
+    fn bootstrap_honors_opt_in_on_low_ram_device() {
         let mut config = Config::default();
         config.local_ai.selected_tier = Some("ram_2_4gb".to_string());
+        config.local_ai.opt_in_confirmed = true;
         crate::openhuman::local_ai::presets::apply_preset_to_config(
             &mut config.local_ai,
             crate::openhuman::local_ai::presets::ModelTier::Ram2To4Gb,
@@ -394,22 +391,20 @@ mod tests {
 
         let effective = config_with_recommended_tier_if_unselected(&config, &device);
 
-        // User explicitly chose a tier, so local_ai stays enabled.
         assert!(
             effective.local_ai.enabled,
-            "explicit tier selection must be honored even on low-RAM device"
+            "explicit opt-in must be honored even on low-RAM device"
         );
     }
 
     #[test]
-    fn bootstrap_respects_explicit_tier_on_sufficient_ram_device() {
-        // Opt-in confirmation: once the user has picked a tier, local AI stays
-        // enabled and the config is returned untouched.
+    fn bootstrap_honors_opt_in_on_sufficient_ram_device() {
         let mut config = Config::default();
-        config.local_ai.selected_tier = Some("ram_8_16gb".to_string());
+        config.local_ai.selected_tier = Some("ram_2_4gb".to_string());
+        config.local_ai.opt_in_confirmed = true;
         crate::openhuman::local_ai::presets::apply_preset_to_config(
             &mut config.local_ai,
-            crate::openhuman::local_ai::presets::ModelTier::Ram8To16Gb,
+            crate::openhuman::local_ai::presets::ModelTier::Ram2To4Gb,
         );
         let device = test_device(16);
 
@@ -417,23 +412,35 @@ mod tests {
 
         assert!(
             effective.local_ai.enabled,
-            "explicit tier selection on sufficient-RAM device must stay enabled"
+            "explicit opt-in on sufficient-RAM device must stay enabled"
         );
         assert_eq!(
             effective.local_ai.chat_model_id, config.local_ai.chat_model_id,
-            "explicit config must not be mutated"
+            "opt-in config must not be mutated"
         );
     }
 
     #[test]
-    fn bootstrap_honors_explicit_non_mvp_tier_selection() {
+    fn bootstrap_overrides_stale_selected_tier_without_opt_in() {
+        // Existing install (pre-MVP) had `selected_tier = "ram_2_4gb"` auto-populated
+        // by old RAM-based bootstrap logic, but never went through an explicit MVP
+        // opt-in. `opt_in_confirmed = false` must hard-override to disabled.
         let mut config = Config::default();
-        config.local_ai.selected_tier = Some("high".to_string());
-        let device = test_device(8);
+        config.local_ai.enabled = true;
+        config.local_ai.selected_tier = Some("ram_2_4gb".to_string());
+        config.local_ai.opt_in_confirmed = false;
+        let device = test_device(16);
 
         let effective = config_with_recommended_tier_if_unselected(&config, &device);
 
-        // User explicitly picked a high-tier preset — honor it, no MVP clamp.
-        assert_eq!(effective.local_ai.selected_tier.as_deref(), Some("high"));
+        assert!(
+            !effective.local_ai.enabled,
+            "stale selected_tier without opt_in_confirmed must be hard-overridden to disabled"
+        );
+        assert_eq!(
+            effective.local_ai.selected_tier.as_deref(),
+            Some("ram_2_4gb"),
+            "bootstrap must leave the persisted selected_tier untouched — only the effective `enabled` flips"
+        );
     }
 }
