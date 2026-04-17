@@ -420,8 +420,7 @@ mod tests {
             "explicit tier selection on sufficient-RAM device must stay enabled"
         );
         assert_eq!(
-            effective.local_ai.chat_model_id,
-            config.local_ai.chat_model_id,
+            effective.local_ai.chat_model_id, config.local_ai.chat_model_id,
             "explicit config must not be mutated"
         );
     }
