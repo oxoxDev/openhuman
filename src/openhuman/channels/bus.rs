@@ -566,69 +566,78 @@ async fn delete_channel_message(channel: &str, message_id: &str) {
 /// creates a fresh outbound message is when no draft has been posted
 /// at all.
 async fn finalize_channel_reply(channel: &str, state: &mut StreamingState, final_text: &str) {
-    // ── Clean up ephemeral thinking message ──────────────────────
-    // Delete the "💭 Thinking…" message so the user only sees the
-    // clean final response (#600).
-    if let Some(ref thinking_id) = state.thinking_message_id {
-        delete_channel_message(channel, thinking_id).await;
+    // Deliver the canonical reply FIRST, then clean up the ephemeral
+    // "💭 Thinking:" bubble. Deleting before the reply would leave the
+    // chat empty for a beat; this order keeps something visible at all
+    // times (#600).
+    'send: {
+        if let Some(ref message_id) = state.message_id {
+            // We committed to a draft earlier in the turn. Always attempt
+            // to edit it with the canonical reply, even when we'd
+            // previously latched `edit_disabled` during the streaming
+            // phase — the user is already looking at that message, so a
+            // late edit attempt is still the right call. If the edit
+            // fails, delete the orphan draft and send the final reply
+            // as a fresh atomic message so the user always sees it.
+            if let Some((client, jwt)) = build_channel_client().await {
+                let body = json!({ "text": final_text });
+                match client
+                    .send_channel_edit(channel, message_id, &jwt, body)
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            "[channel-inbound] final edit ok channel='{}' msg_id={} chars={}",
+                            channel,
+                            message_id,
+                            final_text.len(),
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "[channel-inbound] final edit failed channel='{}' msg_id={} err={} — deleting orphan draft and sending fresh atomic reply so user still sees the canonical response",
+                            channel,
+                            message_id,
+                            err,
+                        );
+                        let orphan = message_id.clone();
+                        delete_channel_message(channel, &orphan).await;
+                        send_channel_reply(channel, final_text).await;
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "[channel-inbound] cannot finalize channel='{}' msg_id={} — backend client unavailable, draft left in place",
+                    channel,
+                    message_id,
+                );
+            }
+            break 'send;
+        }
+        if state.draft_sent {
+            // A draft was posted but the backend didn't return an id, so
+            // we have nothing to edit. Since the draft only contains a
+            // clean text prefix (or "_working…_" placeholder), sending the
+            // final response as a second bubble is acceptable — leaving
+            // the user without the canonical reply is worse (#600).
+            tracing::warn!(
+                "[channel-inbound] sending fresh reply on channel='{}' — id-less draft exists but user needs the final response",
+                channel,
+            );
+            send_channel_reply(channel, final_text).await;
+            break 'send;
+        }
+        // No draft exists — this is the first (and only) message for the
+        // turn. Safe to send atomically.
+        send_channel_reply(channel, final_text).await;
     }
 
-    if let Some(ref message_id) = state.message_id {
-        // We committed to a draft earlier in the turn. Always attempt
-        // to edit it with the canonical reply, even when we'd
-        // previously latched `edit_disabled` during the streaming
-        // phase — the user is already looking at that message, so a
-        // late edit attempt is still the right call. If the edit
-        // fails, leave the draft in place rather than spamming a
-        // duplicate bubble.
-        if let Some((client, jwt)) = build_channel_client().await {
-            let body = json!({ "text": final_text });
-            match client
-                .send_channel_edit(channel, message_id, &jwt, body)
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(
-                        "[channel-inbound] final edit ok channel='{}' msg_id={} chars={}",
-                        channel,
-                        message_id,
-                        final_text.len(),
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "[channel-inbound] final edit failed channel='{}' msg_id={} err={} — draft left in place (no duplicate message sent)",
-                        channel,
-                        message_id,
-                        err,
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                "[channel-inbound] cannot finalize channel='{}' msg_id={} — backend client unavailable, draft left in place",
-                channel,
-                message_id,
-            );
-        }
-        return;
+    // ── Clean up ephemeral thinking message ──────────────────────
+    // Delete after the canonical reply is already on screen so the
+    // chat is never momentarily empty between the two operations.
+    if let Some(thinking_id) = state.thinking_message_id.take() {
+        delete_channel_message(channel, &thinking_id).await;
     }
-    if state.draft_sent {
-        // A draft was posted but the backend didn't return an id, so
-        // we have nothing to edit. Since the draft only contains a
-        // clean text prefix (or "_working…_" placeholder), sending the
-        // final response as a second bubble is acceptable — leaving
-        // the user without the canonical reply is worse (#600).
-        tracing::warn!(
-            "[channel-inbound] sending fresh reply on channel='{}' — id-less draft exists but user needs the final response",
-            channel,
-        );
-        send_channel_reply(channel, final_text).await;
-        return;
-    }
-    // No draft exists — this is the first (and only) message for the
-    // turn. Safe to send atomically.
-    send_channel_reply(channel, final_text).await;
 }
 
 /// Construct the REST client + session JWT shared by every outbound
