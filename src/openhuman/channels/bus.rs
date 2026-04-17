@@ -198,7 +198,7 @@ impl EventHandler for ChannelInboundSubscriber {
                     }
                 }
                 _ = edit_timer.tick() => {
-                    if streaming_state.thinking_dirty {
+                    if streaming_state.thinking_dirty && !streaming_state.thinking_edit_disabled {
                         flush_thinking_message(channel, &mut streaming_state).await;
                     }
                     if streaming_state.dirty && !streaming_state.edit_disabled {
@@ -276,6 +276,12 @@ struct StreamingState {
     thinking_sent: bool,
     /// New thinking content has arrived since the last thinking flush.
     thinking_dirty: bool,
+    /// Latched when the first thinking POST succeeded with 200 but the
+    /// backend didn't return an id we can edit. Without this latch,
+    /// every subsequent `thinking_dirty` tick re-enters the "send new
+    /// message" branch and the user sees one italic bubble per
+    /// accumulated snippet instead of a single evolving one (#600).
+    thinking_edit_disabled: bool,
 }
 
 /// Typing-indicator bookkeeping. One per in-flight turn. Latches
@@ -508,16 +514,18 @@ async fn flush_thinking_message(channel: &str, state: &mut StreamingState) {
                     state.thinking_message_id = Some(id);
                 } else {
                     tracing::debug!(
-                        "[channel-inbound][thinking] thinking msg sent but no id returned — will not be deletable",
+                        "[channel-inbound][thinking] thinking msg sent but no id returned — disabling further thinking edits",
                     );
+                    state.thinking_edit_disabled = true;
                 }
             }
             Err(err) => {
                 tracing::warn!(
-                    "[channel-inbound][thinking] failed to send thinking msg channel='{}' err={}",
+                    "[channel-inbound][thinking] failed to send thinking msg channel='{}' err={} — disabling further thinking edits",
                     channel,
                     err,
                 );
+                state.thinking_edit_disabled = true;
             }
         }
     }
