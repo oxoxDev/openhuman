@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import debug from 'debug';
 
 import { callCoreRpc } from './coreRpcClient';
+import { chatSend } from './chatService';
+import { threadApi } from './api/threadApi';
 import { store } from '../store';
 import {
   appendLog,
@@ -10,6 +12,8 @@ import {
   setAccountStatus,
 } from '../store/accountsSlice';
 import type { AccountProvider, IngestedMessage } from '../types/accounts';
+
+const MEET_ORCHESTRATOR_MODEL = 'reasoning-v1';
 
 const log = debug('webview-accounts');
 const errLog = debug('webview-accounts:error');
@@ -436,6 +440,10 @@ async function flushMeetingSession(
         },
       })
     );
+
+    if (segments.length > 0) {
+      await handoffToOrchestrator(accountId, session, endedAt, markdown, participants);
+    }
   } catch (err) {
     errLog('meet: memory write failed: %o', err);
     store.dispatch(
@@ -445,6 +453,67 @@ async function flushMeetingSession(
           ts: endedAt,
           level: 'error',
           msg: `[meet] failed to save transcript for ${session.code}: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      })
+    );
+  }
+}
+
+/**
+ * After a meeting transcript is persisted, open a fresh thread with the
+ * orchestrator agent and hand it the transcript so it can extract notes
+ * (summary, decisions, action items) and proactively act on follow-ups.
+ *
+ * The orchestrator IS the LLM here — there's no separate summarisation
+ * call. It produces structured notes inline as part of its reply and
+ * routes any actionable items to its subagents/skills.
+ */
+async function handoffToOrchestrator(
+  accountId: string,
+  session: MeetingSession,
+  endedAt: number,
+  transcriptMarkdown: string,
+  participants: Set<string>
+): Promise<void> {
+  const durationMin = Math.max(1, Math.round((endedAt - session.startedAt) / 60_000));
+  const participantList = Array.from(participants).join(', ') || 'unknown participants';
+
+  const prompt = [
+    `I just finished a Google Meet call (\`${session.code}\`, ~${durationMin} min, with ${participantList}).`,
+    '',
+    'Please:',
+    '1. Extract structured meeting notes — a brief summary, key decisions, action items (with owners + deadlines if mentioned), and open questions / follow-ups.',
+    '2. For any action item that you can act on with your tools (drafting messages, scheduling follow-ups, creating tasks, updating notes, etc.), proactively handle it now and report back what you did.',
+    '',
+    'Transcript:',
+    '',
+    transcriptMarkdown,
+  ].join('\n');
+
+  try {
+    const thread = await threadApi.createNewThread();
+    log('meet: created orchestrator thread %s for code=%s', thread.id, session.code);
+    await chatSend({ threadId: thread.id, message: prompt, model: MEET_ORCHESTRATOR_MODEL });
+    log('meet: handed off to orchestrator thread=%s code=%s', thread.id, session.code);
+    store.dispatch(
+      appendLog({
+        accountId,
+        entry: {
+          ts: endedAt,
+          level: 'info',
+          msg: `[meet] orchestrator working on notes + follow-ups for ${session.code} (thread ${thread.id})`,
+        },
+      })
+    );
+  } catch (err) {
+    errLog('meet: orchestrator handoff failed: %o', err);
+    store.dispatch(
+      appendLog({
+        accountId,
+        entry: {
+          ts: endedAt,
+          level: 'error',
+          msg: `[meet] failed to hand off ${session.code} to orchestrator: ${err instanceof Error ? err.message : String(err)}`,
         },
       })
     );

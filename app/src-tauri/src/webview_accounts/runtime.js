@@ -46,11 +46,13 @@
 
   function send(kind, payload) {
     return rawInvoke('webview_recipe_event', {
-      accountId: ctx.accountId,
-      provider: ctx.provider,
-      kind: kind,
-      payload: payload || {},
-      ts: Date.now(),
+      args: {
+        account_id: ctx.accountId,
+        provider: ctx.provider,
+        kind: kind,
+        payload: payload || {},
+        ts: Date.now(),
+      },
     });
   }
 

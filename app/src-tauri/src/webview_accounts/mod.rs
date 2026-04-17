@@ -848,6 +848,60 @@ pub async fn webview_recipe_event<R: Runtime>(
         args.provider,
         args.kind
     );
+    if args.provider == "google-meet" {
+        match args.kind.as_str() {
+            "meet_call_started" => {
+                let code = args
+                    .payload
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                log::info!(
+                    "[gmeet][{}] call_started code={}",
+                    args.account_id,
+                    code
+                );
+            }
+            "meet_captions" => {
+                let code = args
+                    .payload
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let n = args
+                    .payload
+                    .get("captions")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                log::info!(
+                    "[gmeet][{}] captions code={} rows={}",
+                    args.account_id,
+                    code,
+                    n
+                );
+            }
+            "meet_call_ended" => {
+                let code = args
+                    .payload
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let reason = args
+                    .payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                log::info!(
+                    "[gmeet][{}] call_ended code={} reason={}",
+                    args.account_id,
+                    code,
+                    reason
+                );
+            }
+            _ => {}
+        }
+    }
     if args.kind == "ingest" {
         if let Some(messages) = args.payload.get("messages").and_then(|v| v.as_array()) {
             log::info!(

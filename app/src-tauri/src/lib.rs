@@ -708,6 +708,69 @@ pub fn run() {
                 }
             }
 
+            // Same dev helper, Google Meet flavour.
+            // OPENHUMAN_DEV_AUTO_GOOGLE_MEET=<uuid> opens the gmeet account
+            // webview at startup so the caption-capture recipe runs
+            // without manual UI clicks. Use in combination with:
+            //   tail -F /tmp/oh-cef.log | grep -E --line-buffered \
+            //     "\[gmeet\]|memory_doc_ingest|orchestrator"
+            // to verify captions flow → transcript persist → thread handoff.
+            if let Ok(account_id) = std::env::var("OPENHUMAN_DEV_AUTO_GOOGLE_MEET") {
+                let account_id = account_id.trim().to_string();
+                if !account_id.is_empty() {
+                    let app_handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let state = app_handle
+                            .state::<webview_accounts::WebviewAccountsState>();
+                        // Dev mode: size the child webview to the parent
+                        // window's inner bounds so Meet controls (CC toggle,
+                        // mic/cam, leave) are reachable without overflowing.
+                        let (w, h) = app_handle
+                            .get_webview_window("main")
+                            .and_then(|main| {
+                                let scale = main.scale_factor().unwrap_or(1.0);
+                                main.inner_size().ok().map(|s| {
+                                    (
+                                        (s.width as f64) / scale,
+                                        (s.height as f64) / scale,
+                                    )
+                                })
+                            })
+                            .unwrap_or((1100.0, 780.0));
+                        let args = webview_accounts::OpenArgs {
+                            account_id: account_id.clone(),
+                            provider: "google-meet".to_string(),
+                            url: None,
+                            bounds: Some(webview_accounts::Bounds {
+                                x: 0.0,
+                                y: 0.0,
+                                width: w,
+                                height: h,
+                            }),
+                        };
+                        match webview_accounts::webview_account_open(
+                            app_handle.clone(),
+                            state,
+                            args,
+                        )
+                        .await
+                        {
+                            Ok(label) => log::info!(
+                                "[dev-auto-gmeet] spawned label={} account={}",
+                                label,
+                                account_id
+                            ),
+                            Err(e) => log::error!(
+                                "[dev-auto-gmeet] failed: {} (account={})",
+                                e,
+                                account_id
+                            ),
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

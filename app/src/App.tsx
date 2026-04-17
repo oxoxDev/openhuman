@@ -19,7 +19,14 @@ import ChatRuntimeProvider from './providers/ChatRuntimeProvider';
 import CoreStateProvider from './providers/CoreStateProvider';
 import SocketProvider from './providers/SocketProvider';
 import { tagErrorSource } from './services/errorReportQueue';
+import { startWebviewAccountService } from './services/webviewAccountService';
 import { persistor, store } from './store';
+
+// Attach the `webview:event` listener at app boot so background recipe
+// events (Google Meet captions → transcript flush, WhatsApp ingest, …)
+// are handled even when the user hasn't navigated to /accounts yet.
+// Idempotent — the service uses a `started` singleton guard.
+startWebviewAccountService();
 
 function App() {
   return (

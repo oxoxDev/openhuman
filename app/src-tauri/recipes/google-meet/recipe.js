@@ -31,6 +31,24 @@
   // for the started/ended lifecycle events.
   let currentCode = null;
   let startedAt = 0;
+
+  // Meet SPA-navigates you off the meeting URL when you leave a call,
+  // which destroys this JS context before emitEnded can run. Persist the
+  // in-progress code to sessionStorage so the recipe on the next page
+  // can emit a synthetic ended event for the previous session. Keyed by
+  // origin (same-origin nav is guaranteed within meet.google.com).
+  const SS_CODE = 'openhuman_gmeet_currentCode';
+  const SS_STARTED_AT = 'openhuman_gmeet_startedAt';
+
+  function ssGet(k) {
+    try { return window.sessionStorage.getItem(k); } catch (_) { return null; }
+  }
+  function ssSet(k, v) {
+    try { window.sessionStorage.setItem(k, v); } catch (_) {}
+  }
+  function ssDel(k) {
+    try { window.sessionStorage.removeItem(k); } catch (_) {}
+  }
   // Last caption snapshot we sent up — compared each tick so we only
   // emit when the on-screen captions actually changed.
   let lastCaptionsKey = '';
@@ -128,6 +146,8 @@
   function emitStarted(code) {
     startedAt = Date.now();
     api.log('info', '[google-meet-recipe] call started: ' + code);
+    ssSet(SS_CODE, code);
+    ssSet(SS_STARTED_AT, String(startedAt));
     try {
       api.emit('meet_call_started', {
         code: code,
@@ -148,6 +168,8 @@
         ' duration_s=' +
         Math.round((endedAt - startedAt) / 1000)
     );
+    ssDel(SS_CODE);
+    ssDel(SS_STARTED_AT);
     try {
       api.emit('meet_call_ended', {
         code: code,
@@ -156,6 +178,28 @@
       });
     } catch (_) {}
   }
+
+  // Recovery path: if Meet destroyed the previous recipe context before
+  // we could emit call_ended (leave-call navigates the SPA), sessionStorage
+  // still has the code. On bootstrap, if we find a stale code AND the
+  // current page has no meeting code, flush the previous session.
+  (function recoverStaleSession() {
+    const staleCode = ssGet(SS_CODE);
+    if (!staleCode) return;
+    const liveCode = meetingCode();
+    if (liveCode === staleCode) {
+      // Page reload inside the same call — resume, don't flush.
+      const staleStarted = parseInt(ssGet(SS_STARTED_AT) || '0', 10);
+      startedAt = staleStarted || Date.now();
+      currentCode = staleCode;
+      return;
+    }
+    // Either the URL has no code (left the call) or a different code
+    // (switched meetings). Either way, close out the previous one.
+    const staleStarted = parseInt(ssGet(SS_STARTED_AT) || '0', 10);
+    if (staleStarted) startedAt = staleStarted;
+    emitEnded(staleCode, liveCode ? 'switched-on-reload' : 'navigated-away');
+  })();
 
   function emitCaptionsIfChanged(code, captions) {
     const key = JSON.stringify(captions);
@@ -170,33 +214,56 @@
     } catch (_) {}
   }
 
-  api.loop(function () {
-    const code = meetingCode();
+  // Positive "we are in the call" signal. The URL keeps the meeting code
+  // in the lobby and on the post-leave screen too, so URL alone is not
+  // enough. Once you actually enter the meeting room, Meet renders one
+  // participant tile per attendee (including your own), marked with
+  // `[data-participant-id]` on the tile wrapper and `[data-self-name]`
+  // on the own-user tile. Neither attribute is present in the lobby or
+  // on the post-leave screen — their presence is the cleanest signal
+  // that we're fully joined.
+  function sawParticipantBubbles() {
+    try {
+      if (document.querySelector('[data-self-name]')) return true;
+      if (document.querySelector('[data-participant-id]')) return true;
+    } catch (_) {}
+    return false;
+  }
 
-    // Lifecycle edges — fire start/end exactly once per transition.
-    if (code !== currentCode) {
-      if (currentCode && !code) {
-        emitEnded(currentCode, 'navigated-away');
-      } else if (!currentCode && code) {
-        emitStarted(code);
-      } else if (currentCode && code && currentCode !== code) {
-        // Jumped straight from one meeting to another without an
-        // intermediate landing — emit end+start so the host can close
-        // and open two transcripts.
-        emitEnded(currentCode, 'switched');
-        currentCode = code;
-        emitStarted(code);
-        lastCaptionsKey = '';
-        return;
-      }
-      currentCode = code;
+  function inCallNow() {
+    const code = meetingCode();
+    if (!code) return null;
+    return sawParticipantBubbles() ? code : null;
+  }
+
+  api.loop(function () {
+    const activeCode = inCallNow();
+
+    // End: we had an active call, and the "Leave call" button is gone
+    // (lobby page, post-leave screen, or SPA-nav to another route).
+    if (currentCode && activeCode !== currentCode) {
+      emitEnded(
+        currentCode,
+        activeCode ? 'switched' : 'leave-call-button-gone'
+      );
+      // If we jumped straight to a different meeting, fall through to
+      // emit the new start on the same tick.
+      currentCode = null;
       lastCaptionsKey = '';
     }
 
-    if (!code) return;
+    // Start: we're in a call (URL matches AND Leave-call button visible)
+    // and we hadn't marked ourselves in-call yet.
+    if (activeCode && !currentCode) {
+      currentCode = activeCode;
+      lastCaptionsKey = '';
+      emitStarted(activeCode);
+    }
+
+    if (!currentCode) return;
     const captions = captionRows();
     if (captions.length > 0) {
-      emitCaptionsIfChanged(code, captions);
+      emitCaptionsIfChanged(currentCode, captions);
     }
   });
 })(window.__openhumanRecipe);
