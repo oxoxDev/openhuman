@@ -43,9 +43,8 @@ pub async fn extract_distribution(
     );
 
     tokio::task::spawn_blocking(move || -> Result<PathBuf> {
-        fs::create_dir_all(&extract_root).with_context(|| {
-            format!("creating extract root {}", extract_root.display())
-        })?;
+        fs::create_dir_all(&extract_root)
+            .with_context(|| format!("creating extract root {}", extract_root.display()))?;
 
         if is_zip {
             extract_zip(&archive, &extract_root)?;
@@ -66,8 +65,8 @@ pub async fn extract_distribution(
 
 /// Extract a `.tar.xz` archive into `extract_root`.
 fn extract_tar_xz(archive: &Path, extract_root: &Path) -> Result<()> {
-    let file = File::open(archive)
-        .with_context(|| format!("opening archive {}", archive.display()))?;
+    let file =
+        File::open(archive).with_context(|| format!("opening archive {}", archive.display()))?;
     let decoder = xz2::read::XzDecoder::new(file);
     let mut tar = tar::Archive::new(decoder);
     // `set_preserve_permissions(true)` is the default on Unix; we restate
@@ -83,8 +82,8 @@ fn extract_tar_xz(archive: &Path, extract_root: &Path) -> Result<()> {
 /// file entries, and restores Unix mode bits where present (no-op on
 /// Windows hosts, which is where `.zip` actually matters).
 fn extract_zip(archive: &Path, extract_root: &Path) -> Result<()> {
-    let file = File::open(archive)
-        .with_context(|| format!("opening archive {}", archive.display()))?;
+    let file =
+        File::open(archive).with_context(|| format!("opening archive {}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(file)
         .with_context(|| format!("opening zip archive {}", archive.display()))?;
 

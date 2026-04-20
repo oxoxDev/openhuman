@@ -43,8 +43,19 @@ const SAFE_ENV_VARS: &[&str] = &[
 /// write actions outside the workspace (`publish` to a registry, `adduser`
 /// / `login` / `logout` which mutate `~/.npmrc`).
 const DISALLOWED_SUBCOMMANDS: &[&str] = &[
-    "publish", "unpublish", "adduser", "login", "logout", "token", "star", "unstar", "owner",
-    "access", "team", "hook", "profile",
+    "publish",
+    "unpublish",
+    "adduser",
+    "login",
+    "logout",
+    "token",
+    "star",
+    "unstar",
+    "owner",
+    "access",
+    "team",
+    "hook",
+    "profile",
 ];
 
 /// `npm_exec` — run npm subcommands (install, run, ci, test, …).
@@ -140,10 +151,7 @@ impl Tool for NpmExecTool {
             })
             .unwrap_or_default();
 
-        let cwd_override = args
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let cwd_override = args.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -272,7 +280,10 @@ fn is_sane_subcommand(s: &str) -> bool {
 
 /// Resolve an optional `cwd` override against the workspace. Rejects any
 /// path that escapes the workspace via `..` or absolute components.
-fn resolve_cwd(workspace: &std::path::Path, override_path: Option<&str>) -> Result<std::path::PathBuf, String> {
+fn resolve_cwd(
+    workspace: &std::path::Path,
+    override_path: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
     match override_path {
         None => Ok(workspace.to_path_buf()),
         Some(raw) => {
@@ -287,7 +298,10 @@ fn resolve_cwd(workspace: &std::path::Path, override_path: Option<&str>) -> Resu
                 ));
             }
             if candidate.components().any(|c| {
-                matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
             }) {
                 return Err(format!(
                     "npm_exec `cwd` must not escape workspace; got {raw:?}"
@@ -304,7 +318,15 @@ mod tests {
 
     #[test]
     fn is_sane_subcommand_accepts_common_npm_verbs() {
-        for v in &["install", "ci", "run", "exec", "test", "test:watch", "run-script"] {
+        for v in &[
+            "install",
+            "ci",
+            "run",
+            "exec",
+            "test",
+            "test:watch",
+            "run-script",
+        ] {
             assert!(is_sane_subcommand(v), "{v} should be accepted");
         }
     }

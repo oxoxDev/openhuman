@@ -172,12 +172,7 @@ impl NodeBootstrap {
         let expected = shasums
             .get(&dist.archive_name)
             .cloned()
-            .with_context(|| {
-                format!(
-                    "SHASUMS256.txt missing entry for {}",
-                    dist.archive_name
-                )
-            })?;
+            .with_context(|| format!("SHASUMS256.txt missing entry for {}", dist.archive_name))?;
 
         let cache_root = self.cache_root();
         tokio::fs::create_dir_all(&cache_root)
