@@ -166,9 +166,18 @@ impl Tool for NodeExecTool {
                 shell_quote(code)
             )
         } else if let Some(path) = script_path.as_deref() {
+            let resolved_script = match resolve_script_path(&self.security.workspace_dir, path) {
+                Ok(p) => p,
+                Err(msg) => return Ok(ToolResult::error(msg)),
+            };
             let mut parts: Vec<String> = Vec::with_capacity(extra_args.len() + 2);
             parts.push(shell_quote(&resolved.node_bin.to_string_lossy()));
-            parts.push(shell_quote(path));
+            parts.push(shell_quote(&resolved_script.to_string_lossy()));
+            // `extra_args` are opaque positional arguments forwarded to the
+            // script. They are shell-quoted below so no shell metacharacter
+            // can escape, but we do NOT treat them as workspace paths — the
+            // script itself is responsible for any path validation it does
+            // on its own arguments.
             for a in &extra_args {
                 parts.push(shell_quote(a));
             }
@@ -250,6 +259,37 @@ fn shell_quote(s: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// Resolve a caller-supplied `script_path` against the workspace. Mirrors
+/// `npm_exec::resolve_cwd` — rejects absolute paths and any component that
+/// could escape the workspace (`..`, Windows drive prefixes). Scripts
+/// themselves must live inside the workspace.
+fn resolve_script_path(
+    workspace: &std::path::Path,
+    raw: &str,
+) -> Result<std::path::PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("node_exec `script_path` cannot be empty".to_string());
+    }
+    let candidate = std::path::Path::new(raw);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "node_exec `script_path` must be relative to workspace; got absolute {raw:?}"
+        ));
+    }
+    if candidate.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "node_exec `script_path` must not escape workspace; got {raw:?}"
+        ));
+    }
+    Ok(workspace.join(candidate))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +314,32 @@ mod tests {
         // $, backticks, && — all inert once wrapped in single quotes.
         assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
         assert_eq!(shell_quote("a && b"), "'a && b'");
+    }
+
+    #[test]
+    fn resolve_script_path_rejects_empty() {
+        let ws = std::path::Path::new("/ws");
+        assert!(resolve_script_path(ws, "").is_err());
+        assert!(resolve_script_path(ws, "   ").is_err());
+    }
+
+    #[test]
+    fn resolve_script_path_rejects_absolute() {
+        let ws = std::path::Path::new("/ws");
+        assert!(resolve_script_path(ws, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn resolve_script_path_rejects_parent_dir() {
+        let ws = std::path::Path::new("/ws");
+        assert!(resolve_script_path(ws, "../evil.js").is_err());
+        assert!(resolve_script_path(ws, "scripts/../../evil.js").is_err());
+    }
+
+    #[test]
+    fn resolve_script_path_accepts_relative_subdir() {
+        let ws = std::path::Path::new("/ws");
+        let resolved = resolve_script_path(ws, "scripts/run.js").unwrap();
+        assert_eq!(resolved, std::path::Path::new("/ws/scripts/run.js"));
     }
 }
