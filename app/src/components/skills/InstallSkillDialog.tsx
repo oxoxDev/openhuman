@@ -2,23 +2,29 @@
  * InstallSkillDialog
  * ------------------
  *
- * Centered white modal that installs a published skill package via
- * `openhuman.skills_install_from_url`. The Rust side shells out to
- * `npx --yes skills add <url>` under the managed Node toolchain, with
- * an allow-list on the URL (https only, no private/loopback/link-local/
- * multicast/cloud-metadata hosts) and a wall-clock timeout (default 60s,
- * max 600s).
+ * Centered white modal that installs a skill via
+ * `openhuman.skills_install_from_url`. The Rust side fetches a single
+ * `SKILL.md` file over HTTPS and writes it into
+ * `<workspace>/.openhuman/skills/<slug>/SKILL.md`. URLs are allow-listed
+ * (https only, no private/loopback/link-local/multicast/cloud-metadata
+ * hosts) and a wall-clock timeout applies (default 60s, max 600s).
+ * `github.com/<o>/<r>/blob/<b>/<p>.md` URLs are auto-rewritten to their
+ * `raw.githubusercontent.com` equivalents.
  *
  * UI contract:
- *   - Single URL input (https only) + optional timeout in seconds.
- *   - While the RPC is in flight we show a "Installing…" indicator and
- *     disable close / backdrop-dismiss so we don't orphan a subprocess.
+ *   - Single URL input (https only, must point at a `.md` file) +
+ *     optional timeout in seconds.
+ *   - While the RPC is in flight we show a "Fetching…" indicator and
+ *     disable close / backdrop-dismiss so the caller sees the outcome.
  *   - On success we surface the list of `newSkills` (ids that appeared
- *     post-install) plus captured stdout/stderr panes, then hand the
- *     first new skill id back to the caller via `onInstalled` so the
+ *     post-install) plus captured fetch log / parse-warning panes, then
+ *     hand the result back to the caller via `onInstalled` so the
  *     parent can refetch the list and auto-select the row.
- *   - On failure the Rust error string is rendered verbatim in a coral
- *     alert and the submit button re-enables.
+ *   - On failure we map the Rust error prefix (`invalid url:`,
+ *     `unsupported url form:`, `fetch failed:`, `fetch too large:`,
+ *     `fetch timed out`, `invalid SKILL.md:`, `skill already installed`,
+ *     `write failed:`) to a short human title + hint, and show the raw
+ *     message below it for debugging.
  *
  * Design mirrors `CreateSkillModal` — see `.claude/rules/15-settings-modal-system.md`.
  */
@@ -65,6 +71,73 @@ function isLikelyValidUrl(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+interface CategorizedError {
+  title: string;
+  hint: string;
+}
+
+/**
+ * Map the stable Rust error prefixes from `install_skill_from_url` to a
+ * short human-readable title + hint. See
+ * `src/openhuman/skills/ops.rs::install_skill_from_url` for the full list.
+ */
+function categorizeInstallError(raw: string): CategorizedError {
+  const msg = raw.trim();
+  const lower = msg.toLowerCase();
+  if (lower.startsWith('invalid url:')) {
+    return {
+      title: 'URL rejected',
+      hint: 'Only public HTTPS URLs are allowed. Private, loopback, and metadata hosts are blocked.',
+    };
+  }
+  if (lower.startsWith('unsupported url form:')) {
+    return {
+      title: 'URL form not supported',
+      hint: 'Only direct `.md` links work. For GitHub, link to a file (github.com/owner/repo/blob/…/SKILL.md) — tree and repo roots are not installed.',
+    };
+  }
+  if (lower.startsWith('fetch too large:')) {
+    return {
+      title: 'SKILL.md too large',
+      hint: 'The SKILL.md must be under 1 MiB. Split bundled resources into `references/` or `scripts/` files instead of inlining them.',
+    };
+  }
+  if (lower.startsWith('fetch timed out')) {
+    return {
+      title: 'Fetch timed out',
+      hint: 'The remote host did not respond in time. Try again or raise the timeout (1–600 s).',
+    };
+  }
+  if (lower.startsWith('fetch failed:')) {
+    return {
+      title: 'Fetch failed',
+      hint: 'The request did not complete successfully. Check the URL points at a reachable public file, and that the host returned a 2xx response.',
+    };
+  }
+  if (lower.startsWith('invalid skill.md:')) {
+    return {
+      title: 'SKILL.md did not parse',
+      hint: 'The frontmatter must be valid YAML with non-empty `name` and `description` fields, terminated by `---`.',
+    };
+  }
+  if (lower.startsWith('skill already installed')) {
+    return {
+      title: 'Skill already installed',
+      hint: 'A skill with this slug already exists in the workspace. Remove it first or change the frontmatter `metadata.id` / `name`.',
+    };
+  }
+  if (lower.startsWith('write failed:')) {
+    return {
+      title: 'Could not write SKILL.md',
+      hint: 'The workspace skills directory was not writable. Check filesystem permissions for `<workspace>/.openhuman/skills/`.',
+    };
+  }
+  return {
+    title: 'Could not install skill',
+    hint: 'The backend returned an error. The raw message is shown below.',
+  };
 }
 
 export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
@@ -177,8 +250,9 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                 Install skill from URL
               </h2>
               <p className="mt-0.5 text-xs text-stone-500">
-                Runs <code className="font-mono">npx --yes skills add &lt;url&gt;</code> under the
-                managed Node toolchain. HTTPS only; private and loopback hosts are blocked.
+                Fetches a single <code className="font-mono">SKILL.md</code> over HTTPS and installs
+                it under <code className="font-mono">.openhuman/skills/</code>. HTTPS only; private
+                and loopback hosts are blocked.
               </p>
             </div>
             <button
@@ -224,7 +298,7 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                 required
                 maxLength={2048}
                 className="mt-1 w-full rounded-lg border border-stone-200 bg-white px-3 py-2 font-mono text-sm text-stone-900 shadow-sm transition-colors focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/30 disabled:bg-stone-50 disabled:text-stone-500"
-                placeholder="https://example.com/my-skill.tgz"
+                placeholder="https://raw.githubusercontent.com/owner/repo/main/SKILL.md"
               />
               {url.trim() && !urlValid ? (
                 <p className="mt-1 text-[11px] text-coral-600">
@@ -232,8 +306,9 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                 </p>
               ) : (
                 <p className="mt-1 text-[11px] text-stone-500">
-                  Points to anything <code className="font-mono">npx skills add</code> accepts — a
-                  tarball, a published npm package, or a git URL.
+                  Direct link to a <code className="font-mono">.md</code> file.{' '}
+                  <code className="font-mono">github.com/…/blob/…</code> URLs auto-rewrite to
+                  <code className="font-mono"> raw.githubusercontent.com</code>.
                 </p>
               )}
             </div>
@@ -278,8 +353,8 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                   className="h-3 w-3 flex-shrink-0 animate-spin rounded-full border-2 border-primary-300 border-t-primary-600"
                 />
                 <span>
-                  Running <code className="font-mono">npx skills add</code>… this can take up to
-                  the timeout you configured.
+                  Fetching <code className="font-mono">SKILL.md</code>… this can take up to the
+                  timeout you configured.
                 </span>
               </div>
             ) : null}
@@ -295,7 +370,7 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                   <p className="mt-1">
                     {result.newSkills.length > 0
                       ? `Discovered ${result.newSkills.length} new skill${result.newSkills.length === 1 ? '' : 's'}.`
-                      : 'No new skill ids appeared — the package may have updated an existing skill or failed silently. Check stderr below.'}
+                      : 'Skill installed, but no new skill ids appeared — the catalog may already contain a skill with the same slug.'}
                   </p>
                   {result.newSkills.length > 0 ? (
                     <ul className="mt-1 list-disc pl-5 font-mono">
@@ -307,7 +382,7 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                 </div>
                 {result.stdout ? (
                   <details>
-                    <summary className="cursor-pointer font-semibold">stdout</summary>
+                    <summary className="cursor-pointer font-semibold">Fetch log</summary>
                     <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-sage-100 bg-white p-2 font-mono text-[11px] text-stone-800">
                       {result.stdout}
                     </pre>
@@ -315,7 +390,7 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
                 ) : null}
                 {result.stderr ? (
                   <details>
-                    <summary className="cursor-pointer font-semibold">stderr</summary>
+                    <summary className="cursor-pointer font-semibold">Parse warnings</summary>
                     <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-sage-100 bg-white p-2 font-mono text-[11px] text-stone-800">
                       {result.stderr}
                     </pre>
@@ -328,9 +403,22 @@ export default function InstallSkillDialog({ onClose, onInstalled }: Props) {
             {error ? (
               <div
                 role="alert"
-                className="rounded-xl border border-coral-200 bg-coral-50 p-3 text-xs text-coral-900">
-                <p className="font-semibold">Could not install skill</p>
-                <p className="mt-1 whitespace-pre-wrap font-mono">{error}</p>
+                className="space-y-2 rounded-xl border border-coral-200 bg-coral-50 p-3 text-xs text-coral-900">
+                {(() => {
+                  const cat = categorizeInstallError(error);
+                  return (
+                    <>
+                      <p className="font-semibold">{cat.title}</p>
+                      <p>{cat.hint}</p>
+                      <details>
+                        <summary className="cursor-pointer font-semibold">Raw error</summary>
+                        <pre className="mt-1 whitespace-pre-wrap rounded border border-coral-200 bg-white p-2 font-mono text-[11px] text-stone-800">
+                          {error}
+                        </pre>
+                      </details>
+                    </>
+                  );
+                })()}
               </div>
             ) : null}
           </div>
