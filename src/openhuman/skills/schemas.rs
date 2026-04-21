@@ -5,8 +5,10 @@
 //!   current user home and workspace.
 //! * `skills.read_resource` — read a single bundled resource file, with path
 //!   traversal, symlink, size and UTF-8 guards.
+//! * `skills.create` — scaffold a new SKILL.md skill under the user or
+//!   workspace scope.
 //!
-//! Both controllers resolve the active workspace via the persisted config
+//! All controllers resolve the active workspace via the persisted config
 //! layer (`config::load_config_with_timeout`) so the CLI and UI see the same
 //! skills catalog without the caller having to thread a workspace path.
 
@@ -20,7 +22,8 @@ use crate::core::all::{ControllerFuture, RegisteredController};
 use crate::core::{ControllerSchema, FieldSchema, TypeSchema};
 use crate::openhuman::config::Config;
 use crate::openhuman::skills::ops::{
-    discover_skills, is_workspace_trusted, read_skill_resource, Skill, SkillScope,
+    create_skill, discover_skills, is_workspace_trusted, read_skill_resource, CreateSkillParams,
+    Skill, SkillScope,
 };
 use crate::rpc::RpcOutcome;
 
@@ -34,6 +37,36 @@ struct SkillsListParams {
 struct SkillsReadResourceParams {
     skill_id: String,
     relative_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillsCreateParams {
+    name: String,
+    description: String,
+    #[serde(default)]
+    scope: SkillScope,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default, rename = "allowed-tools", alias = "allowed_tools")]
+    allowed_tools: Vec<String>,
+}
+
+impl From<SkillsCreateParams> for CreateSkillParams {
+    fn from(p: SkillsCreateParams) -> Self {
+        CreateSkillParams {
+            name: p.name,
+            description: p.description,
+            scope: p.scope,
+            license: p.license,
+            author: p.author,
+            tags: p.tags,
+            allowed_tools: p.allowed_tools,
+        }
+    }
 }
 
 /// Wire-format representation of a discovered skill. Mirrors the fields in
@@ -94,10 +127,16 @@ struct SkillsReadResourceResult {
     bytes: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct SkillsCreateResult {
+    skill: SkillSummary,
+}
+
 pub fn all_skills_controller_schemas() -> Vec<ControllerSchema> {
     vec![
         skills_schemas("skills_list"),
         skills_schemas("skills_read_resource"),
+        skills_schemas("skills_create"),
     ]
 }
 
@@ -110,6 +149,10 @@ pub fn all_skills_registered_controllers() -> Vec<RegisteredController> {
         RegisteredController {
             schema: skills_schemas("skills_read_resource"),
             handler: handle_skills_read_resource,
+        },
+        RegisteredController {
+            schema: skills_schemas("skills_create"),
+            handler: handle_skills_create,
         },
     ]
 }
@@ -172,6 +215,61 @@ pub fn skills_schemas(function: &str) -> ControllerSchema {
                     required: true,
                 },
             ],
+        },
+        "skills_create" => ControllerSchema {
+            namespace: "skills",
+            function: "create",
+            description: "Scaffold a new SKILL.md skill under the user or workspace scope.",
+            inputs: vec![
+                FieldSchema {
+                    name: "name",
+                    ty: TypeSchema::String,
+                    comment: "Human-readable name (slugified into the on-disk directory).",
+                    required: true,
+                },
+                FieldSchema {
+                    name: "description",
+                    ty: TypeSchema::String,
+                    comment: "One-line description written into SKILL.md frontmatter.",
+                    required: true,
+                },
+                FieldSchema {
+                    name: "scope",
+                    ty: TypeSchema::String,
+                    comment: "Target scope: 'user' (default) or 'project' (requires trust marker).",
+                    required: false,
+                },
+                FieldSchema {
+                    name: "license",
+                    ty: TypeSchema::String,
+                    comment: "Optional SPDX license identifier.",
+                    required: false,
+                },
+                FieldSchema {
+                    name: "author",
+                    ty: TypeSchema::String,
+                    comment: "Optional author name (written under frontmatter.metadata.author).",
+                    required: false,
+                },
+                FieldSchema {
+                    name: "tags",
+                    ty: TypeSchema::Array(Box::new(TypeSchema::String)),
+                    comment: "Optional tags for the skill.",
+                    required: false,
+                },
+                FieldSchema {
+                    name: "allowed_tools",
+                    ty: TypeSchema::Array(Box::new(TypeSchema::String)),
+                    comment: "Optional tool hints (maps to frontmatter.allowed-tools).",
+                    required: false,
+                },
+            ],
+            outputs: vec![FieldSchema {
+                name: "skill",
+                ty: TypeSchema::Ref("SkillSummary"),
+                comment: "The newly created skill, re-discovered through the standard pipeline.",
+                required: true,
+            }],
         },
         _ => ControllerSchema {
             namespace: "skills",
@@ -238,6 +336,37 @@ fn handle_skills_read_resource(params: Map<String, Value>) -> ControllerFuture {
                     error = %err,
                     "[skills][rpc] read_resource: rejected"
                 );
+                Err(err)
+            }
+        }
+    })
+}
+
+fn handle_skills_create(params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let payload = deserialize_params::<SkillsCreateParams>(params)?;
+        tracing::debug!(
+            name = %payload.name,
+            scope = ?payload.scope,
+            "[skills][rpc] create"
+        );
+        let workspace = resolve_workspace_dir().await;
+        match create_skill(workspace.as_path(), payload.into()) {
+            Ok(skill) => {
+                tracing::debug!(
+                    skill = %skill.name,
+                    location = ?skill.location,
+                    "[skills][rpc] create: ok"
+                );
+                to_json(RpcOutcome::new(
+                    SkillsCreateResult {
+                        skill: SkillSummary::from(skill),
+                    },
+                    Vec::new(),
+                ))
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "[skills][rpc] create: rejected");
                 Err(err)
             }
         }
