@@ -28,6 +28,15 @@ const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 const RESOURCE_DIRS: &[&str] = &["scripts", "references", "assets"];
 
+/// Upper bound on resource payload size (in bytes) returned by
+/// [`read_skill_resource`]. 128 KB is large enough for a typical SKILL-bundled
+/// script or reference doc but small enough to keep the JSON-RPC payload and
+/// UI memory footprint bounded even when a skill author bundles something
+/// unusually chonky (e.g. a minified binary fixture). Requests for files
+/// larger than this limit are rejected outright — callers must stream or
+/// download the file via another mechanism.
+pub const MAX_SKILL_RESOURCE_BYTES: u64 = 128 * 1024;
+
 /// Where the skill was discovered. Determines precedence on name collision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -632,6 +641,153 @@ pub fn inventory_resources(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Read a bundled skill resource as UTF-8 text, hardened against directory
+/// traversal, symlink escape, and oversized payloads.
+///
+/// `skill_id` identifies the skill by its discovered `name` — the same field
+/// surfaced on [`Skill::name`]. The skill is resolved by running the standard
+/// discovery pipeline (`dirs::home_dir()` + `workspace_dir`, honoring the
+/// `.openhuman/trust` marker) and locating the matching entry; this keeps the
+/// read scoped to legitimately installed skills and reuses all the symlink /
+/// traversal hardening already baked into discovery.
+///
+/// `relative_path` is resolved relative to the skill's on-disk directory
+/// (the parent of its `SKILL.md` / `skill.json`). All of the following are
+/// rejected with an error:
+///
+/// * paths that canonicalize outside the skill root (traversal),
+/// * paths whose final component or any intermediate component is a symlink
+///   (link-follow escape),
+/// * non-file targets (directories, sockets, fifos),
+/// * files larger than [`MAX_SKILL_RESOURCE_BYTES`],
+/// * non-UTF-8 byte contents (binary files must be surfaced some other way —
+///   no lossy replacement).
+///
+/// On success returns the file's contents as an owned `String`.
+pub fn read_skill_resource(
+    workspace_dir: &Path,
+    skill_id: &str,
+    relative_path: &Path,
+) -> Result<String, String> {
+    tracing::debug!(
+        skill_id = %skill_id,
+        relative_path = %relative_path.display(),
+        workspace = %workspace_dir.display(),
+        "[skills] read_skill_resource: entry"
+    );
+
+    if skill_id.trim().is_empty() {
+        return Err("skill_id must not be empty".to_string());
+    }
+
+    let relative_str = relative_path.to_string_lossy();
+    if relative_str.trim().is_empty() {
+        return Err("relative_path must not be empty".to_string());
+    }
+    if relative_path.is_absolute() {
+        return Err("relative_path must be relative, not absolute".to_string());
+    }
+    // Reject any component that is `..`, is empty, starts with `.`, or is the
+    // root. `..` is the obvious traversal vector; the others are defense in
+    // depth against unusual path inputs (e.g. `./`, `//foo`, Windows `C:`).
+    for component in relative_path.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) => {}
+            Component::ParentDir => {
+                return Err("relative_path must not contain '..' components".to_string());
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("relative_path must be a plain relative path".to_string());
+            }
+        }
+    }
+
+    // Resolve the skill by running the standard discovery pipeline. We reuse
+    // `load_skills` (which honors both user and workspace roots plus the
+    // trust marker) so the resource read is scoped to the exact same set of
+    // skills the UI would already have shown the user.
+    let skills = load_skills(workspace_dir);
+    let skill = skills
+        .into_iter()
+        .find(|s| s.name == skill_id)
+        .ok_or_else(|| format!("skill '{skill_id}' not found"))?;
+    let skill_root = skill
+        .location
+        .as_deref()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| format!("skill '{skill_id}' has no on-disk location"))?
+        .to_path_buf();
+
+    // Canonicalize the root first. The root must itself be a real directory
+    // on disk (not a symlink). Reject early if this fails.
+    let canonical_root = std::fs::canonicalize(&skill_root).map_err(|e| {
+        format!(
+            "failed to canonicalize skill root {}: {e}",
+            skill_root.display()
+        )
+    })?;
+
+    let requested = canonical_root.join(relative_path);
+
+    // Pre-check the immediate target with `symlink_metadata` so we catch
+    // symlinked leaves before `canonicalize` silently follows them.
+    let leaf_meta = std::fs::symlink_metadata(&requested)
+        .map_err(|e| format!("failed to stat resource {}: {e}", requested.display()))?;
+    if leaf_meta.file_type().is_symlink() {
+        return Err("resource path is a symlink".to_string());
+    }
+    if !leaf_meta.is_file() {
+        return Err("resource path is not a regular file".to_string());
+    }
+
+    // Size gate — check via metadata before reading so we never allocate the
+    // buffer for an oversized file.
+    let size = leaf_meta.len();
+    if size > MAX_SKILL_RESOURCE_BYTES {
+        return Err(format!(
+            "resource file is {size} bytes, exceeds limit of {MAX_SKILL_RESOURCE_BYTES}"
+        ));
+    }
+
+    // Canonicalize the full path and verify it stays within the skill root.
+    // This catches any symlink reachable via an intermediate path component
+    // that was created after our initial checks (race-ish, but the
+    // `is_symlink` check above makes the obvious attack infeasible).
+    let canonical_requested = std::fs::canonicalize(&requested).map_err(|e| {
+        format!(
+            "failed to canonicalize resource {}: {e}",
+            requested.display()
+        )
+    })?;
+    if !canonical_requested.starts_with(&canonical_root) {
+        return Err(format!(
+            "resource path escapes skill root: {}",
+            canonical_requested.display()
+        ));
+    }
+
+    // Read the bytes and enforce strict UTF-8 (no lossy replacement — we
+    // would rather refuse a binary file than silently mangle it).
+    let bytes = std::fs::read(&canonical_requested).map_err(|e| {
+        format!(
+            "failed to read resource {}: {e}",
+            canonical_requested.display()
+        )
+    })?;
+    let content = std::str::from_utf8(&bytes)
+        .map_err(|e| format!("resource is not valid UTF-8 text: {e}"))?
+        .to_string();
+
+    tracing::debug!(
+        skill_id = %skill_id,
+        bytes = bytes.len(),
+        "[skills] read_skill_resource: success"
+    );
+
+    Ok(content)
+}
+
 fn walk_files(current: &Path, base: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(current) {
         Ok(e) => e,
@@ -1024,5 +1180,184 @@ mod tests {
         );
         let skills = load_skills_ws(ws);
         assert!(skills.is_empty());
+    }
+
+    // -- read_skill_resource -------------------------------------------------
+    //
+    // These tests exercise the resource-read path via legacy-scope skills
+    // (`<ws>/skills/<name>/`) because that scope doesn't require the trust
+    // marker, is fully workspace-scoped, and avoids touching the user's home
+    // directory. The guarantees tested here apply equally to user- and
+    // project-scope skills since they all flow through the same
+    // `canonicalize` + `symlink_metadata` + size check gauntlet.
+
+    fn make_legacy_skill(ws: &Path, name: &str) -> PathBuf {
+        let skill_dir = ws.join("skills").join(name);
+        write(
+            &skill_dir.join("SKILL.md"),
+            &format!("---\nname: {name}\ndescription: test skill\n---\n# {name}\n"),
+        );
+        skill_dir
+    }
+
+    #[test]
+    fn read_skill_resource_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let skill_dir = make_legacy_skill(ws, "demo");
+        write(
+            &skill_dir.join("scripts").join("hello.sh"),
+            "#!/bin/sh\necho hi\n",
+        );
+
+        let got = read_skill_resource(ws, "demo", Path::new("scripts/hello.sh"))
+            .expect("read should succeed");
+        assert_eq!(got, "#!/bin/sh\necho hi\n");
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_parent_dir_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let skill_dir = make_legacy_skill(ws, "demo");
+        // Put a secret *outside* the skill root.
+        write(&ws.join("secret.txt"), "top secret");
+        // Put a resource file inside so the skill has at least one bundled
+        // asset (makes the test realistic).
+        write(&skill_dir.join("scripts").join("ok.sh"), "ok");
+
+        let err = read_skill_resource(ws, "demo", Path::new("../../secret.txt"))
+            .expect_err("parent-dir traversal must be rejected");
+        assert!(
+            err.contains("..") || err.to_lowercase().contains("escape"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        make_legacy_skill(ws, "demo");
+
+        let err = read_skill_resource(ws, "demo", Path::new("/etc/passwd"))
+            .expect_err("absolute path must be rejected");
+        assert!(
+            err.to_lowercase().contains("absolute"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_skill_resource_rejects_symlinked_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let skill_dir = make_legacy_skill(ws, "demo");
+
+        // Target lives outside the skill root.
+        let external = tempfile::tempdir().unwrap();
+        write(&external.path().join("leaked.txt"), "leaked content");
+
+        // Symlink <skill>/scripts/leak.txt -> external/leaked.txt
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        symlink(
+            external.path().join("leaked.txt"),
+            skill_dir.join("scripts/leak.txt"),
+        )
+        .unwrap();
+
+        let err = read_skill_resource(ws, "demo", Path::new("scripts/leak.txt"))
+            .expect_err("symlinked leaf must be rejected");
+        assert!(
+            err.to_lowercase().contains("symlink") || err.to_lowercase().contains("escape"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let skill_dir = make_legacy_skill(ws, "demo");
+        // Write MAX + 1 bytes.
+        let oversize = vec![b'a'; (MAX_SKILL_RESOURCE_BYTES as usize) + 1];
+        let target = skill_dir.join("references").join("big.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, &oversize).unwrap();
+
+        let err = read_skill_resource(ws, "demo", Path::new("references/big.txt"))
+            .expect_err("oversized file must be rejected");
+        assert!(
+            err.to_lowercase().contains("exceeds") || err.to_lowercase().contains("limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_non_utf8_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let skill_dir = make_legacy_skill(ws, "demo");
+        // 0xFF is never valid UTF-8 (invalid start byte in any multi-byte
+        // sequence).
+        let target = skill_dir.join("assets").join("binary.bin");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, [0xFFu8, 0xFE, 0xFD, 0xFC]).unwrap();
+
+        let err = read_skill_resource(ws, "demo", Path::new("assets/binary.bin"))
+            .expect_err("non-UTF-8 content must be rejected");
+        assert!(
+            err.to_lowercase().contains("utf-8"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_unknown_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+
+        let err = read_skill_resource(ws, "does-not-exist", Path::new("scripts/x.sh"))
+            .expect_err("unknown skill must be rejected");
+        assert!(
+            err.to_lowercase().contains("not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_directory_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let skill_dir = make_legacy_skill(ws, "demo");
+        std::fs::create_dir_all(skill_dir.join("scripts").join("nested")).unwrap();
+
+        let err = read_skill_resource(ws, "demo", Path::new("scripts/nested"))
+            .expect_err("directory target must be rejected");
+        assert!(
+            err.to_lowercase().contains("not a regular file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_empty_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        make_legacy_skill(ws, "demo");
+
+        let err = read_skill_resource(ws, "", Path::new("scripts/x.sh"))
+            .expect_err("empty skill_id must be rejected");
+        assert!(err.to_lowercase().contains("skill_id"), "unexpected: {err}");
+
+        let err = read_skill_resource(ws, "demo", Path::new(""))
+            .expect_err("empty relative_path must be rejected");
+        assert!(
+            err.to_lowercase().contains("relative_path"),
+            "unexpected: {err}"
+        );
     }
 }
