@@ -405,7 +405,10 @@ fn load_skill_dir(dir: &Path, dir_name: &str, scope: SkillScope) -> Option<Skill
 fn load_from_skill_md(skill_md: &Path, dir: &Path, dir_name: &str, scope: SkillScope) -> Skill {
     let mut warnings = Vec::new();
     let (frontmatter, body) = match parse_skill_md(skill_md) {
-        Some(parts) => parts,
+        Some((fm, body, parse_warnings)) => {
+            warnings.extend(parse_warnings);
+            (fm, body)
+        }
         None => {
             warnings.push(format!(
                 "could not parse {} — exposing directory as placeholder",
@@ -538,13 +541,19 @@ fn load_from_legacy_manifest(
 ///
 /// Accepts frontmatter delimited by leading `---` lines. Returns `None` when
 /// the file cannot be read or the frontmatter block is unterminated.
-pub fn parse_skill_md(path: &Path) -> Option<(SkillFrontmatter, String)> {
+///
+/// The third element of the tuple carries parse-level diagnostics — for now
+/// just the YAML deserialisation error when frontmatter exists but is
+/// malformed. Callers merge these into the skill's user-visible warnings so
+/// the catalog surfaces the real cause instead of a generic "could not parse"
+/// placeholder.
+pub fn parse_skill_md(path: &Path) -> Option<(SkillFrontmatter, String, Vec<String>)> {
     let content = std::fs::read_to_string(path).ok()?;
     let mut lines = content.lines();
     let first = lines.next()?;
     if first.trim() != "---" {
         // No frontmatter — treat whole file as body.
-        return Some((SkillFrontmatter::default(), content));
+        return Some((SkillFrontmatter::default(), content, Vec::new()));
     }
 
     let mut yaml = String::new();
@@ -568,15 +577,20 @@ pub fn parse_skill_md(path: &Path) -> Option<(SkillFrontmatter, String)> {
         return None;
     }
 
-    let frontmatter = serde_yaml::from_str::<SkillFrontmatter>(&yaml).unwrap_or_else(|err| {
-        log::warn!(
-            "[skills] failed to parse frontmatter in {}: {err}",
-            path.display()
-        );
-        SkillFrontmatter::default()
-    });
+    let mut parse_warnings = Vec::new();
+    let frontmatter = match serde_yaml::from_str::<SkillFrontmatter>(&yaml) {
+        Ok(fm) => fm,
+        Err(err) => {
+            log::warn!(
+                "[skills] failed to parse frontmatter in {}: {err}",
+                path.display()
+            );
+            parse_warnings.push(format!("frontmatter parse error: {err}"));
+            SkillFrontmatter::default()
+        }
+    };
 
-    Some((frontmatter, body))
+    Some((frontmatter, body, parse_warnings))
 }
 
 /// Shallow-scan a skill directory for bundled resources.
@@ -717,7 +731,7 @@ mod tests {
             &path,
             "---\nname: s\ndescription: d\nlicense: MIT\ncompatibility: \"node>=18\"\nmetadata:\n  version: 1.0.0\n  author: Alice\n  tags: [a, b]\n---\n",
         );
-        let (fm, _body) = parse_skill_md(&path).unwrap();
+        let (fm, _body, _warnings) = parse_skill_md(&path).unwrap();
         assert_eq!(fm.license.as_deref(), Some("MIT"));
         assert_eq!(fm.compatibility.as_deref(), Some("node>=18"));
         assert_eq!(
@@ -856,7 +870,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILL.md");
         write(&path, "just a markdown body\n");
-        let (fm, body) = parse_skill_md(&path).unwrap();
+        let (fm, body, _warnings) = parse_skill_md(&path).unwrap();
         assert!(fm.name.is_empty());
         assert!(body.contains("markdown body"));
     }
