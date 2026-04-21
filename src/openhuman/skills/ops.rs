@@ -359,8 +359,16 @@ fn scan_root(root: &Path, scope: SkillScope) -> Vec<Skill> {
         Err(_) => return Vec::new(),
     };
 
+    // `read_dir` order is unspecified. When two sibling directories declare
+    // the same logical `frontmatter.name` (which can differ from the folder
+    // name), cross-scope/same-scope deduplication downstream would otherwise
+    // pick a non-deterministic winner across runs. Sort by on-disk directory
+    // name for a stable, reproducible order.
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
     let mut out = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         if !path.is_dir() {
             continue;
