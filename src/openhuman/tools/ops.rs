@@ -3,6 +3,7 @@ use super::*;
 use crate::openhuman::agent::host_runtime::{NativeRuntime, RuntimeAdapter};
 use crate::openhuman::config::{Config, DelegateAgentConfig};
 use crate::openhuman::memory::Memory;
+use crate::openhuman::node_runtime::NodeBootstrap;
 use crate::openhuman::security::SecurityPolicy;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,10 +72,43 @@ pub fn all_tools_with_runtime(
     fallback_api_key: Option<&str>,
     root_config: &crate::openhuman::config::Config,
 ) -> Vec<Box<dyn Tool>> {
+    // Build a session-scoped managed Node.js bootstrap once, so ShellTool,
+    // NodeExecTool, and NpmExecTool all share the same memoised resolution
+    // state. Disabled when `node.enabled = false` — in that case shell skips
+    // PATH injection and node/npm tools are not registered.
+    let node_bootstrap: Option<Arc<NodeBootstrap>> = if root_config.node.enabled {
+        tracing::debug!(
+            version = %root_config.node.version,
+            prefer_system = root_config.node.prefer_system,
+            "[tools::ops] node runtime enabled — constructing shared NodeBootstrap"
+        );
+        Some(Arc::new(NodeBootstrap::new(
+            root_config.node.clone(),
+            workspace_dir.to_path_buf(),
+            reqwest::Client::new(),
+        )))
+    } else {
+        tracing::debug!(
+            "[tools::ops] node runtime disabled — shell PATH injection + node_exec/npm_exec suppressed"
+        );
+        None
+    };
+
+    let shell: Box<dyn Tool> = if let Some(bootstrap) = node_bootstrap.as_ref() {
+        Box::new(ShellTool::with_node_bootstrap(
+            security.clone(),
+            Arc::clone(&runtime),
+            Arc::clone(bootstrap),
+        ))
+    } else {
+        Box::new(ShellTool::new(security.clone(), Arc::clone(&runtime)))
+    };
+
     let mut tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(ShellTool::new(security.clone(), runtime)),
+        shell,
         Box::new(FileReadTool::new(security.clone())),
         Box::new(FileWriteTool::new(security.clone())),
+        Box::new(CsvExportTool::new(security.clone())),
         // Sub-agent dispatch — lets the parent agent delegate focused
         // sub-tasks (research, code execution, API specialists, …) by
         // calling `spawn_subagent { agent_id, prompt, … }`. The runner
@@ -83,6 +117,7 @@ pub fn all_tools_with_runtime(
         // `agent::harness::subagent_runner` for the dispatch path.
         Box::new(SpawnSubagentTool::new()),
         Box::new(CompleteOnboardingTool::new()),
+        Box::new(CurrentTimeTool::new()),
         Box::new(CronAddTool::new(config.clone(), security.clone())),
         Box::new(CronListTool::new(config.clone())),
         Box::new(CronRemoveTool::new(config.clone())),
@@ -131,24 +166,44 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    if http_config.enabled {
-        tools.push(Box::new(HttpRequestTool::new(
-            security.clone(),
-            http_config.allowed_domains.clone(),
-            http_config.max_response_size,
-            http_config.timeout_secs,
-        )));
-    }
+    // HTTP request — always registered. `http_request.allowed_domains`
+    // + `security` still gate which hosts are reachable; there is no
+    // enable flag because every session needs basic HTTP as a baseline
+    // capability.
+    tools.push(Box::new(HttpRequestTool::new(
+        security.clone(),
+        http_config.allowed_domains.clone(),
+        http_config.max_response_size,
+        http_config.timeout_secs,
+    )));
 
-    // Web search tool (enabled by default for GLM and other models)
-    if root_config.web_search.enabled {
-        tools.push(Box::new(WebSearchTool::new(
-            root_config.web_search.provider.clone(),
-            root_config.web_search.brave_api_key.clone(),
-            root_config.web_search.parallel_api_key.clone(),
-            root_config.web_search.max_results,
-            root_config.web_search.timeout_secs,
+    // Web search — always registered. Provider / API-key / budget
+    // knobs still come from `config.web_search`, but there is no
+    // enable flag: every session needs research as a baseline
+    // capability.
+    tools.push(Box::new(WebSearchTool::new(
+        root_config.web_search.provider.clone(),
+        root_config.web_search.brave_api_key.clone(),
+        root_config.web_search.parallel_api_key.clone(),
+        root_config.web_search.max_results,
+        root_config.web_search.timeout_secs,
+    )));
+
+    // Managed Node.js exec tools — gated on `root_config.node.enabled`.
+    // Both share the same `NodeBootstrap` as ShellTool so the download +
+    // extract + install pipeline runs at most once per session.
+    if let Some(bootstrap) = node_bootstrap.as_ref() {
+        tools.push(Box::new(NodeExecTool::new(
+            security.clone(),
+            Arc::clone(&runtime),
+            Arc::clone(bootstrap),
         )));
+        tools.push(Box::new(NpmExecTool::new(
+            security.clone(),
+            Arc::clone(&runtime),
+            Arc::clone(bootstrap),
+        )));
+        tracing::debug!("[tools::ops] registered node_exec + npm_exec");
     }
 
     // Vision tools are always available
@@ -391,6 +446,41 @@ mod tests {
     }
 
     #[test]
+    fn all_tools_includes_current_time() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::openhuman::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig::default();
+        let http = crate::openhuman::config::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            names.contains(&"current_time"),
+            "current_time must be registered in the default tool list; got: {names:?}"
+        );
+    }
+
+    #[test]
     fn all_tools_excludes_browser_when_disabled() {
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy::default());
@@ -628,6 +718,89 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"delegate"));
+    }
+
+    #[test]
+    fn all_tools_registers_node_exec_when_node_enabled() {
+        // Default NodeConfig has `enabled = true`, so both `node_exec` and
+        // `npm_exec` must appear in the registry. Regression guard for the
+        // skills integration — if this fires, managed-node skills silently
+        // lose both tools.
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::openhuman::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig::default();
+        let http = crate::openhuman::config::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            names.contains(&"node_exec"),
+            "node_exec must be registered when node.enabled=true; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"npm_exec"),
+            "npm_exec must be registered when node.enabled=true; got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn all_tools_excludes_node_exec_when_node_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(crate::openhuman::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig::default();
+        let http = crate::openhuman::config::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.node.enabled = false;
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"node_exec"),
+            "node_exec must NOT be registered when node.enabled=false; got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"npm_exec"),
+            "npm_exec must NOT be registered when node.enabled=false; got: {names:?}"
+        );
     }
 
     #[test]

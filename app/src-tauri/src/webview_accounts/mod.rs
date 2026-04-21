@@ -156,6 +156,37 @@ fn url_is_internal(provider: &str, url: &Url) -> bool {
         .any(|suffix| host == *suffix || host.ends_with(&format!(".{}", suffix)))
 }
 
+/// `true` if the provider needs `window.open(url)` to return a live
+/// window-handle (i.e. the calling site reads the return value and aborts
+/// on falsey). Slack Huddles go through `openManagedChildWindow` which
+/// calls `window.open("about:blank", …)` and then programmatically
+/// navigates the returned popup to the huddle UI. Denying the popup
+/// makes the huddle call fail silently with a `beacon/error`. For these
+/// cases we allow the default popup so CEF spawns an in-app child window
+/// and returns a real handle to the caller.
+///
+/// Match is intentionally narrow — only the popup URLs the provider
+/// actually needs in-app pass. Cmd/Ctrl-click and `target="_blank"`
+/// on ordinary links (which carry a concrete URL) still route out to
+/// the user's default browser.
+fn popup_should_stay_in_app(provider: &str, url: &Url) -> bool {
+    match provider {
+        "slack" => {
+            // Slack's huddle flow opens `about:blank` first, then navigates
+            // the popup to the huddle URL — at popup-creation time there is
+            // no host yet. Also accept same-origin slack.com hosts so direct
+            // `window.open("https://app.slack.com/...")` calls stay in-app.
+            if url.scheme() == "about" {
+                return true;
+            }
+            match url.host_str() {
+                Some(host) => host == "app.slack.com" || host.ends_with(".slack.com"),
+                None => false,
+            }
+        }
+        _ => false,
+    }
+}
 /// Fire-and-forget handoff to the OS default URL handler. Any error is
 /// logged but not propagated — we've already cancelled the in-app
 /// navigation so there's nowhere to surface a failure to.
@@ -290,9 +321,28 @@ pub struct WebviewEvent {
     pub ts: Option<i64>,
 }
 
+/// Reject any `account_id` that isn't strictly `[A-Za-z0-9_-]+`. The ID comes
+/// from IPC (React shell, but also from injected recipe code running inside
+/// third-party origins via `webview_recipe_event`), so treat it as untrusted.
+/// Enforcing this early prevents `../` sequences from escaping the per-account
+/// data directory in `data_directory_for` (which feeds `create_dir_all` and
+/// `remove_dir_all`).
+fn sanitize_account_id(account_id: &str) -> Result<&str, String> {
+    if account_id.is_empty()
+        || !account_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("invalid account_id: {account_id:?}"));
+    }
+    Ok(account_id)
+}
+
 fn label_for(account_id: &str) -> String {
-    // Webview labels must be alphanumeric + `-` / `_`. Account IDs come from
-    // the React side as UUIDs so this is just defensive.
+    // Webview labels must be alphanumeric + `-` / `_`. Callers that reached
+    // here without first going through `sanitize_account_id` still get a
+    // defensively-scrubbed label so invalid characters never reach the
+    // tauri webview-label parser.
     let safe: String = account_id
         .chars()
         .map(|c| {
@@ -307,6 +357,9 @@ fn label_for(account_id: &str) -> String {
 }
 
 fn data_directory_for<R: Runtime>(app: &AppHandle<R>, account_id: &str) -> Result<PathBuf, String> {
+    // Guard against path traversal — `account_id` is joined into a filesystem
+    // path that is later passed to `create_dir_all` / `remove_dir_all`.
+    let account_id = sanitize_account_id(account_id)?;
     let base = app
         .path()
         .app_local_data_dir()
@@ -434,24 +487,42 @@ pub async fn webview_account_open<R: Runtime>(
     });
 
     // Cmd/Ctrl-click and `target="_blank"` / `window.open(...)` trigger a
-    // new-window request. Denying all of them and handing the URL to the
-    // system browser matches user intent: "open in new tab" outside the
-    // app, not "spawn a rootless OpenHuman window".
+    // new-window request. Default policy: deny and hand the URL to the
+    // system browser — matches user intent of "open in new tab outside
+    // the app".
+    //
+    // Exception: some providers (Slack Huddles) spawn popups via
+    // `window.open()` and abort the flow if the return value is falsey.
+    // For those URLs we allow CEF's default popup handling so an in-app
+    // child window opens and the caller gets a real window handle.
+    let popup_provider = args.provider.clone();
     builder = builder.on_new_window(move |url, _features| {
-        log::info!(
-            "[webview-accounts] new-window request {} → system browser",
-            url
-        );
-        open_in_system_browser(url.as_str());
-        NewWindowResponse::Deny
+        if popup_should_stay_in_app(&popup_provider, &url) {
+            log::info!(
+                "[webview-accounts] new-window request {} → in-app popup (provider={})",
+                url,
+                popup_provider
+            );
+            NewWindowResponse::Allow
+        } else {
+            log::info!(
+                "[webview-accounts] new-window request {} → system browser",
+                url
+            );
+            open_in_system_browser(url.as_str());
+            NewWindowResponse::Deny
+        }
     });
 
-    // Always enable devtools on child webviews so recipe diagnostics and
-    // IndexedDB state can be inspected. Access on macOS is via
+    // Enable devtools on child webviews in debug builds only so recipe
+    // diagnostics and IndexedDB state can be inspected. Access on macOS is via
     //   Safari → Develop → <App name> → <webview label>
     // (the parent Tauri window's right-click "Inspect" does not propagate
-    // into child webviews on WKWebView).
-    builder = builder.devtools(true);
+    // into child webviews on WKWebView). In release builds we leave CDP off
+    // so third-party-site webviews are not remotely inspectable.
+    if cfg!(debug_assertions) {
+        builder = builder.devtools(true);
+    }
 
     if let Some(ua) = provider_user_agent(&args.provider) {
         builder = builder.user_agent(ua);
@@ -867,8 +938,24 @@ pub async fn webview_account_eval<R: Runtime>(
 #[tauri::command]
 pub async fn webview_recipe_event<R: Runtime>(
     app: AppHandle<R>,
+    webview: tauri::Webview<R>,
     args: RecipeEventArgs,
 ) -> Result<(), String> {
+    // The event can only be trusted if the invoking webview is the
+    // `acct_<account_id>` webview for the account in the payload. A
+    // compromised renderer or a sibling child webview must not be able to
+    // forge events for another account.
+    let caller_label = webview.label().to_string();
+    let expected_label = label_for(&args.account_id);
+    if caller_label != expected_label {
+        log::warn!(
+            "[webview-accounts] recipe_event rejected: caller_label={} expected={} account={}",
+            caller_label,
+            expected_label,
+            args.account_id
+        );
+        return Err("webview label does not match account_id".to_string());
+    }
     log::debug!(
         "[webview-accounts] recipe_event account={} provider={} kind={}",
         args.account_id,

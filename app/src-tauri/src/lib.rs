@@ -6,11 +6,12 @@ mod core_update;
 #[cfg(feature = "cef")]
 mod discord_scanner;
 #[cfg(feature = "cef")]
+mod imessage_scanner;
+#[cfg(feature = "cef")]
 mod slack_scanner;
 #[cfg(feature = "cef")]
 mod telegram_scanner;
 mod webview_accounts;
-#[cfg(feature = "cef")]
 mod whatsapp_scanner;
 
 use std::sync::Mutex;
@@ -91,6 +92,7 @@ fn overlay_parent_rpc_url() -> Option<String> {
     Some(trimmed.to_string())
 }
 
+#[allow(dead_code)] // Overlay disabled in tauri.conf.json; helper kept for future re-enable.
 fn pin_overlay_bottom_right(window: &WebviewWindow<AppRuntime>) {
     let Ok(Some(monitor)) = window.current_monitor() else {
         log::warn!("[overlay] could not resolve current monitor for positioning");
@@ -113,6 +115,7 @@ fn pin_overlay_bottom_right(window: &WebviewWindow<AppRuntime>) {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Overlay disabled in tauri.conf.json; helper kept for future re-enable.
 fn configure_overlay_window_macos(window: &WebviewWindow<AppRuntime>) {
     // Standard NSWindow cannot float above fullscreen apps on macOS because
     // fullscreen apps run in a separate Space. Only NSPanel can do this.
@@ -221,6 +224,13 @@ async fn run_core_cli(args: Vec<String>) -> Result<String, String> {
             cmd.arg("core");
         }
         cmd.args(&args);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
         log::info!(
             "[service-direct] running {:?} {}{}",
@@ -428,22 +438,28 @@ fn is_daemon_mode() -> bool {
     std::env::args().any(|arg| arg == "daemon" || arg == "--daemon")
 }
 
-fn show_main_window(app: &AppHandle<AppRuntime>) {
-    if let Some(window) = app.get_webview_window("main") {
-        if let Err(err) = window.show() {
-            log::error!("[tray] failed to show main window: {err}");
-        }
-        if let Err(err) = window.unminimize() {
-            log::error!("[tray] failed to unminimize main window: {err}");
-        }
-        if let Err(err) = window.set_focus() {
-            log::error!("[tray] failed to focus main window: {err}");
-        }
-    } else {
-        log::error!("[tray] main window not found");
-    }
+/// Tauri command: bring the main window to front from any webview (e.g. overlay orb click).
+#[tauri::command]
+fn activate_main_window(app: AppHandle<AppRuntime>) -> Result<(), String> {
+    log::debug!("[window] activate_main_window called from overlay");
+    show_main_window(&app)
 }
 
+fn show_main_window(app: &AppHandle<AppRuntime>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    window
+        .show()
+        .map_err(|err| format!("failed to show main window: {err}"))?;
+    window
+        .unminimize()
+        .map_err(|err| format!("failed to unminimize main window: {err}"))?;
+    window
+        .set_focus()
+        .map_err(|err| format!("failed to focus main window: {err}"))?;
+    Ok(())
+}
 fn setup_tray(app: &AppHandle<AppRuntime>) -> tauri::Result<()> {
     log::info!("[tray] setting up tray icon");
 
@@ -468,7 +484,9 @@ fn setup_tray(app: &AppHandle<AppRuntime>) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "tray_show_window" => {
                 log::info!("[tray] action=show_window source=menu");
-                show_main_window(app);
+                if let Err(err) = show_main_window(app) {
+                    log::error!("[tray] failed to show main window from menu: {err}");
+                }
             }
             "tray_quit" => {
                 log::info!("[tray] action=quit source=menu");
@@ -484,7 +502,9 @@ fn setup_tray(app: &AppHandle<AppRuntime>) -> tauri::Result<()> {
             } = event
             {
                 log::info!("[tray] action=show_window source=left_click");
-                show_main_window(tray.app_handle());
+                if let Err(err) = show_main_window(tray.app_handle()) {
+                    log::error!("[tray] failed to show main window from tray click: {err}");
+                }
             }
         })
         .build(app)?;
@@ -509,7 +529,7 @@ pub fn run() {
     #[cfg(not(feature = "cef"))]
     let builder = tauri::Builder::<tauri::Wry>::new();
     #[cfg(feature = "cef")]
-    let builder = tauri::Builder::<tauri::Cef>::new()
+    let builder = {
         // Bypass macOS Keychain. Without this, every embedded service that
         // touches password / cookie / encryption-key storage triggers a
         // "Allow access to your keychain?" prompt — WhatsApp Web hits it on
@@ -518,24 +538,35 @@ pub fn run() {
         // mock; `password-store=basic` is the equivalent for the password
         // manager. Both are no-ops on Windows/Linux, so safe to always set.
         //
-        // `remote-debugging-port` exposes Chrome DevTools for every CEF
-        // webview (main window + per-account service views) at
-        //   http://localhost:9222
-        // — open that URL in any browser to pick a target. Right-click
-        // "Inspect" does not work on CEF child webviews on macOS, so this
-        // is the only reliable way to inspect IndexedDB / console / storage
-        // for the embedded WhatsApp/Slack/etc. webviews.
+        // In debug builds we additionally expose the Chrome DevTools
+        // Protocol on localhost:9222 so every CEF webview can be inspected
+        // from a regular browser (right-click "Inspect" does not propagate
+        // to CEF child webviews on macOS). Release builds intentionally do
+        // NOT open the CDP port — it would let any process on the machine
+        // drive the embedded WhatsApp/Slack/etc. webviews.
+        //
         // NOTE: flags must be prefixed with `--`. The runtime's
         // `on_before_command_line_processing` dispatch (in
         // `tauri-runtime-cef/src/cef_impl.rs`) routes value-less args that
         // don't start with `-` to `append_argument` (positional) instead of
         // `append_switch`, which means Chromium silently ignores them.
-        .command_line_args::<&str, &str>([
+        let mut args: Vec<(&str, Option<&str>)> = vec![
             ("--use-mock-keychain", None),
             ("--password-store", Some("basic")),
-            ("--remote-debugging-port", Some("9222")),
-            ("--remote-allow-origins", Some("*")),
-        ]);
+            // Enable SharedArrayBuffer so embedded apps that need WebRTC
+            // audio worklets / Opus encoders (Slack Huddles, Meet
+            // real-time features, Discord voice) can actually initialise.
+            // Chromium gates SharedArrayBuffer behind cross-origin
+            // isolation by default; web apps embedded inside CEF rarely
+            // send COOP/COEP headers, so without this flag the feature
+            // silently disappears and huddle/call buttons no-op.
+            ("--enable-features", Some("SharedArrayBuffer")),
+        ];
+        if cfg!(debug_assertions) {
+            args.push(("--remote-debugging-port", Some("9222")));
+        }
+        tauri::Builder::<tauri::Cef>::new().command_line_args::<&str, &str>(args)
+    };
 
     let builder = builder
         .plugin(tauri_plugin_opener::init())
@@ -545,6 +576,7 @@ pub fn run() {
         .manage(DictationHotkeyState(Mutex::new(Vec::new())))
         .manage(webview_accounts::WebviewAccountsState::default());
     #[cfg(feature = "cef")]
+    let builder = builder.manage(std::sync::Arc::new(imessage_scanner::ScannerRegistry::new()));
     let builder = builder.manage(whatsapp_scanner::ScannerRegistry::new());
     #[cfg(feature = "cef")]
     let builder = builder.manage(slack_scanner::ScannerRegistry::new());
@@ -602,23 +634,23 @@ pub fn run() {
                 }
             }
 
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(window) = app.get_webview_window("overlay") {
-                    configure_overlay_window_macos(&window);
-                } else {
-                    log::warn!("[overlay] overlay window not found during setup");
-                }
-            }
-
-            if let Some(window) = app.get_webview_window("overlay") {
-                pin_overlay_bottom_right(&window);
-                if let Err(err) = window.show() {
-                    log::warn!("[overlay] failed to show overlay on startup: {err}");
-                } else {
-                    log::info!("[overlay] overlay shown on startup");
-                }
-            }
+            // Overlay window is currently disabled in `tauri.conf.json` (the
+            // `overlay` entry under `app.windows` was removed), so we skip
+            // the macOS NSPanel reclass + bottom-right pin + initial show
+            // here. The helpers (`configure_overlay_window_macos`,
+            // `pin_overlay_bottom_right`) and the React entry point
+            // (`src/overlay/OverlayApp.tsx`) are kept intact so the overlay
+            // can be re-enabled by restoring the config entry and the two
+            // setup blocks below.
+            //
+            //   #[cfg(target_os = "macos")]
+            //   if let Some(window) = app.get_webview_window("overlay") {
+            //       configure_overlay_window_macos(&window);
+            //   }
+            //   if let Some(window) = app.get_webview_window("overlay") {
+            //       pin_overlay_bottom_right(&window);
+            //       let _ = window.show();
+            //   }
 
             if let Err(err) = setup_tray(app.handle()) {
                 log::error!("[tray] failed to setup tray icon: {err}");
@@ -755,7 +787,6 @@ pub fn run() {
                     });
                 }
             }
-
             // Same dev helper, Google Meet flavour.
             // OPENHUMAN_DEV_AUTO_GOOGLE_MEET=<uuid> opens the gmeet account
             // webview at startup so the caption-capture recipe runs
@@ -815,6 +846,21 @@ pub fn run() {
                 }
             }
 
+            #[cfg(all(target_os = "macos", feature = "cef"))]
+            {
+                use std::sync::Arc;
+                // The scanner task self-gates on `channels_config.imessage` via
+                // JSON-RPC each tick — it stays idle until the user connects
+                // iMessage and stops ingesting as soon as they disconnect. We
+                // spawn it here just so the loop is live and picks up state
+                // changes without requiring an app restart.
+                if let Some(registry) = app.try_state::<Arc<imessage_scanner::ScannerRegistry>>() {
+                    let registry = registry.inner().clone();
+                    let app_handle = app.handle().clone();
+                    registry.ensure_scanner(app_handle, "default".to_string());
+                    log::info!("[imessage] scanner scheduled (gates on config each tick)");
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -837,7 +883,8 @@ pub fn run() {
             webview_accounts::webview_account_hide,
             webview_accounts::webview_account_show,
             webview_accounts::webview_recipe_event,
-            webview_accounts::webview_account_eval
+            webview_accounts::webview_account_eval,
+            activate_main_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -859,7 +906,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => {
                 log::info!("[window] reopen event — showing main window");
-                show_main_window(app_handle);
+                if let Err(err) = show_main_window(app_handle) {
+                    log::error!("[macos] failed to show main window on reopen: {err}");
+                }
             }
             RunEvent::Exit => {
                 if let Some(core) = app_handle.try_state::<core_process::CoreProcessHandle>() {

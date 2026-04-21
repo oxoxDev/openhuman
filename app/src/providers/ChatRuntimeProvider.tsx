@@ -1,6 +1,7 @@
 import debug from 'debug';
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
+import { requestUsageRefresh } from '../hooks/usageRefresh';
 import {
   type ChatInferenceStartEvent,
   type ChatIterationStartEvent,
@@ -9,6 +10,7 @@ import {
   type ChatSubagentSpawnedEvent,
   type ChatToolCallEvent,
   type ChatToolResultEvent,
+  type ProactiveMessageEvent,
   segmentText,
   subscribeChatEvents,
 } from '../services/chatService';
@@ -27,7 +29,14 @@ import {
 } from '../store/chatRuntimeSlice';
 import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { selectSocketStatus } from '../store/socketSelectors';
-import { addInferenceResponse, setActiveThread } from '../store/threadSlice';
+import {
+  addInferenceResponse,
+  createNewThread,
+  generateThreadTitleIfNeeded,
+  setActiveThread,
+  setSelectedThread,
+} from '../store/threadSlice';
+import { formatTimelineEntry, promptFromArgsBuffer } from '../utils/toolTimelineFormatting';
 
 const logChatRuntime = debug('openhuman:chat-runtime');
 
@@ -55,6 +64,8 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
   );
 
   const seenChatEventsRef = useRef<Map<string, number>>(new Map());
+  const proactiveThreadCreationPromiseRef = useRef<Promise<string | null> | null>(null);
+  const proactiveDispatchQueueRef = useRef<Promise<void>>(Promise.resolve());
   const toolTimelineRef = useRef(toolTimelineByThread);
   const inferenceStatusRef = useRef(inferenceStatusByThread);
   const streamingAssistantRef = useRef(streamingAssistantByThread);
@@ -104,8 +115,82 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
     return true;
   };
 
+  const proactiveMessageDigest = (input: string): string => {
+    // Small non-cryptographic digest to keep dedupe keys bounded.
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i += 1) {
+      hash ^= input.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  };
+
+  const resolveVisibleThreadForProactive = useCallback(
+    async (incomingThreadId: string): Promise<string | null> => {
+      if (!incomingThreadId.startsWith('proactive:')) {
+        return incomingThreadId;
+      }
+
+      const state = store.getState().thread;
+      const targetFromState =
+        state.selectedThreadId ?? state.activeThreadId ?? state.threads[0]?.id ?? null;
+      if (targetFromState) {
+        return targetFromState;
+      }
+
+      if (proactiveThreadCreationPromiseRef.current) {
+        return proactiveThreadCreationPromiseRef.current;
+      }
+
+      const createPromise: Promise<string | null> = (async () => {
+        try {
+          const newThread = await dispatch(createNewThread()).unwrap();
+          dispatch(setSelectedThread(newThread.id));
+          return newThread.id;
+        } catch (error) {
+          rtLog('proactive_thread_create_failed', {
+            err: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        } finally {
+          proactiveThreadCreationPromiseRef.current = null;
+        }
+      })();
+      proactiveThreadCreationPromiseRef.current = createPromise;
+
+      try {
+        return await createPromise;
+      } finally {
+        // no-op: cleared in createPromise.finally
+      }
+    },
+    [dispatch]
+  );
+
   useEffect(() => {
     if (socketStatus !== 'connected') return;
+
+    const decorateEntry = (entry: ToolTimelineEntry): ToolTimelineEntry => {
+      const formatted = formatTimelineEntry(entry);
+      return { ...entry, displayName: formatted.title, detail: formatted.detail };
+    };
+
+    const findPendingDelegationContext = (
+      entries: ToolTimelineEntry[],
+      round: number
+    ): { sourceToolName?: string; prompt?: string } => {
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const entry = entries[i];
+        if (entry.status !== 'running' || entry.round !== round) continue;
+        if (entry.name === 'spawn_subagent' || entry.name.startsWith('delegate_')) {
+          return {
+            sourceToolName: entry.name,
+            prompt: entry.detail ?? promptFromArgsBuffer(entry.argsBuffer),
+          };
+        }
+      }
+      return {};
+    };
 
     rtLog('subscribe_chat_events', { socket: socketStatus });
     const cleanup = subscribeChatEvents({
@@ -164,23 +249,23 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
         let entries: ToolTimelineEntry[];
         if (existingIdx >= 0) {
           entries = [...existing];
-          entries[existingIdx] = {
+          entries[existingIdx] = decorateEntry({
             ...entries[existingIdx],
             name: event.tool_name,
             round: event.round,
             status: 'running',
-          };
+          });
         } else {
           entries = [
             ...existing,
-            {
+            decorateEntry({
               id:
                 event.tool_call_id ??
                 `${event.thread_id}:${event.round}:${existing.length}:${event.tool_name}`,
               name: event.tool_name,
               round: event.round,
               status: 'running',
-            },
+            }),
           ];
         }
         dispatch(setToolTimelineForThread({ threadId: event.thread_id, entries }));
@@ -251,17 +336,20 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
         );
 
         const existing = store.getState().chatRuntime.toolTimelineByThread[event.thread_id] ?? [];
+        const pendingContext = findPendingDelegationContext(existing, event.round);
         dispatch(
           setToolTimelineForThread({
             threadId: event.thread_id,
             entries: [
               ...existing,
-              {
+              decorateEntry({
                 id: `${event.thread_id}:subagent:${event.skill_id}:${event.tool_name}`,
                 name: `subagent:${event.tool_name}`,
                 round: event.round,
                 status: 'running',
-              },
+                detail: pendingContext.prompt,
+                sourceToolName: pendingContext.sourceToolName,
+              }),
             ],
           })
         );
@@ -272,10 +360,10 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
         if (existing.length > 0) {
           const entries = existing.map(entry =>
             entry.id === subagentRowId && entry.status === 'running'
-              ? {
+              ? decorateEntry({
                   ...entry,
                   status: (event.success ? 'success' : 'error') as ToolTimelineEntryStatus,
-                }
+                })
               : entry
           );
           dispatch(setToolTimelineForThread({ threadId: event.thread_id, entries }));
@@ -349,27 +437,56 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
         let entries: ToolTimelineEntry[];
         if (matchIdx >= 0) {
           entries = [...existing];
-          entries[matchIdx] = {
+          entries[matchIdx] = decorateEntry({
             ...entries[matchIdx],
             argsBuffer: `${entries[matchIdx].argsBuffer ?? ''}${event.delta}`,
             name:
               entries[matchIdx].name.length === 0 && event.tool_name
                 ? event.tool_name
                 : entries[matchIdx].name,
-          };
+          });
         } else {
           entries = [
             ...existing,
-            {
+            decorateEntry({
               id: event.tool_call_id,
               name: event.tool_name ?? '',
               round: event.round,
               status: 'running',
               argsBuffer: event.delta,
-            },
+            }),
           ];
         }
         dispatch(setToolTimelineForThread({ threadId: event.thread_id, entries }));
+      },
+      onProactiveMessage: (event: ProactiveMessageEvent) => {
+        const messageDigest = proactiveMessageDigest(event.full_response ?? '');
+        const eventKey = `proactive:${event.thread_id}:${event.request_id ?? 'none'}:${messageDigest}`;
+        if (
+          !markChatEventSeen(eventKey, { threadId: event.thread_id, requestId: event.request_id })
+        )
+          return;
+
+        proactiveDispatchQueueRef.current = proactiveDispatchQueueRef.current.then(async () => {
+          try {
+            const targetThreadId = await resolveVisibleThreadForProactive(event.thread_id);
+            if (!targetThreadId) return;
+            rtLog('proactive_message', {
+              from: event.thread_id,
+              to: targetThreadId,
+              request: event.request_id,
+            });
+            await dispatch(
+              addInferenceResponse({ content: event.full_response, threadId: targetThreadId })
+            );
+          } catch (error) {
+            rtLog('proactive_dispatch_failed', {
+              from: event.thread_id,
+              request: event.request_id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        });
       },
       onDone: event => {
         const eventKey = `done:${event.thread_id}:${event.request_id ?? 'none'}`;
@@ -394,12 +511,49 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
           );
           dispatch(setToolTimelineForThread({ threadId: event.thread_id, entries }));
         }
-
         if (!event.segment_total) {
-          void dispatch(
-            addInferenceResponse({ content: event.full_response, threadId: event.thread_id })
-          );
+          void (async () => {
+            try {
+              await dispatch(
+                addInferenceResponse({ content: event.full_response, threadId: event.thread_id })
+              ).unwrap();
+              void dispatch(
+                generateThreadTitleIfNeeded({
+                  threadId: event.thread_id,
+                  assistantMessage: event.full_response,
+                })
+              );
+            } catch (error) {
+              rtLog('chat_done_append_failed', {
+                thread: event.thread_id,
+                request: event.request_id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+            rtLog('refresh_usage_counter', {
+              thread: event.thread_id,
+              request: event.request_id,
+              reason: 'chat_done',
+            });
+            requestUsageRefresh();
+            dispatch(endInferenceTurn({ threadId: event.thread_id }));
+            dispatch(setActiveThread(null));
+          })();
+          return;
         }
+
+        void dispatch(
+          generateThreadTitleIfNeeded({
+            threadId: event.thread_id,
+            assistantMessage: event.full_response,
+          })
+        );
+        rtLog('refresh_usage_counter', {
+          thread: event.thread_id,
+          request: event.request_id,
+          reason: 'chat_done',
+        });
+        requestUsageRefresh();
         dispatch(endInferenceTurn({ threadId: event.thread_id }));
         dispatch(setActiveThread(null));
       },
@@ -444,6 +598,13 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
               })
             );
           }
+
+          rtLog('refresh_usage_counter', {
+            thread: event.thread_id,
+            request: event.request_id,
+            reason: 'chat_error',
+          });
+          requestUsageRefresh();
         }
 
         dispatch(endInferenceTurn({ threadId: event.thread_id }));
@@ -455,7 +616,7 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
       rtLog('unsubscribe_chat_events');
       cleanup();
     };
-  }, [dispatch, socketStatus]);
+  }, [dispatch, resolveVisibleThreadForProactive, socketStatus]);
 
   return <>{children}</>;
 };

@@ -167,7 +167,7 @@ pub async fn composio_execute(
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
     match result {
-        Ok(resp) => {
+        Ok(mut resp) => {
             crate::core::event_bus::publish_global(
                 crate::core::event_bus::DomainEvent::ComposioActionExecuted {
                     tool: tool.to_string(),
@@ -177,6 +177,34 @@ pub async fn composio_execute(
                     elapsed_ms,
                 },
             );
+            // Mirror the agent-tool path (see `tools::ComposioExecuteTool::execute`):
+            // route through the toolkit's native provider so CLI and JSON-RPC
+            // callers see the same envelope the agent sees (e.g. Gmail HTML →
+            // markdown). `raw_html: true` in `arguments` opts out for
+            // `GMAIL_FETCH_EMAILS`.
+            //
+            // Provider registry is populated by `bus::start_composio_bus` on
+            // the server path; the CLI/RPC one-shot path never boots the bus,
+            // so ensure the built-ins are registered before we look up. The
+            // init fn is idempotent.
+            if resp.successful {
+                super::providers::init_default_providers();
+                if let Some(toolkit) = super::providers::toolkit_from_slug(tool) {
+                    if let Some(provider) = super::providers::get_provider(&toolkit) {
+                        tracing::trace!(
+                            toolkit = toolkit.as_str(),
+                            tool = tool,
+                            has_args = arguments.is_some(),
+                            "[composio] post-processing action result"
+                        );
+                        provider.post_process_action_result(
+                            tool,
+                            arguments.as_ref(),
+                            &mut resp.data,
+                        );
+                    }
+                }
+            }
             Ok(RpcOutcome::new(
                 resp,
                 vec![format!("composio: executed {tool} ({elapsed_ms}ms)")],
@@ -512,7 +540,7 @@ async fn fetch_connected_integrations_uncached(
     // Pull the backend allowlist — every toolkit the orchestrator can
     // possibly suggest, regardless of whether the user has authorized
     // it yet. This is the universe of valid `toolkit` arguments to
-    // `spawn_subagent(skills_agent, …)`.
+    // `spawn_subagent(integrations_agent, …)`.
     //
     // On transient backend errors we return `None` instead of a
     // degraded `Some(Vec::new())` so `fetch_connected_integrations`
@@ -571,7 +599,7 @@ async fn fetch_connected_integrations_uncached(
                 // caching connected entries with empty `tools` vectors
                 // would cause `subagent_runner::run_typed_mode` to
                 // build zero dynamic Composio action tools for a
-                // toolkit-scoped `skills_agent` spawn, silently
+                // toolkit-scoped `integrations_agent` spawn, silently
                 // leaving the sub-agent with nothing callable.
                 return None;
             }
@@ -587,37 +615,49 @@ async fn fetch_connected_integrations_uncached(
     // Build one entry per allowlisted toolkit. Connected entries
     // carry their action catalogue; not-connected entries carry an
     // empty `tools` vec.
-    let mut integrations: Vec<ConnectedIntegration> = unique_toolkits
-        .iter()
-        .map(|slug| {
-            let connected = connected_slugs.contains(slug);
-            // Anchor the prefix with an underscore so slugs that share
-            // a text prefix (e.g. `git` vs `github`) don't false-match
-            // each other's actions. `GMAIL_SEND_EMAIL` matches `gmail_`,
-            // not just `gmail`, so siblings stay in their own buckets.
-            let action_prefix = format!("{}_", slug.to_uppercase());
-            let tools: Vec<ConnectedIntegrationTool> = if connected {
-                tools_by_toolkit
-                    .iter()
-                    .filter(|t| t.function.name.starts_with(&action_prefix))
-                    .map(|t| ConnectedIntegrationTool {
-                        name: t.function.name.clone(),
-                        description: t.function.description.clone().unwrap_or_default(),
-                        parameters: t.function.parameters.clone(),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+    let mut integrations: Vec<ConnectedIntegration> = Vec::with_capacity(unique_toolkits.len());
+    for slug in &unique_toolkits {
+        let connected = connected_slugs.contains(slug);
+        // Anchor the prefix with an underscore so slugs that share
+        // a text prefix (e.g. `git` vs `github`) don't false-match
+        // each other's actions. `GMAIL_SEND_EMAIL` matches `gmail_`,
+        // not just `gmail`, so siblings stay in their own buckets.
+        let action_prefix = format!("{}_", slug.to_uppercase());
+        let tools: Vec<ConnectedIntegrationTool> = if connected {
+            // Apply the same curated-whitelist + user-scope filter the
+            // meta-tool layer uses, so the integrations_agent prompt
+            // only advertises actions the agent is actually allowed to
+            // call. One pref load per toolkit (not per action).
+            let pref = super::providers::load_user_scope_or_default(slug).await;
+            let filtered: Vec<&super::types::ComposioToolSchema> = tools_by_toolkit
+                .iter()
+                .filter(|t| t.function.name.starts_with(&action_prefix))
+                .filter(|t| super::providers::is_action_visible_with_pref(&t.function.name, &pref))
+                .collect();
+            tracing::debug!(
+                toolkit = %slug,
+                kept = filtered.len(),
+                "[composio][scopes] integrations prompt action set"
+            );
+            filtered
+                .into_iter()
+                .map(|t| ConnectedIntegrationTool {
+                    name: t.function.name.clone(),
+                    description: t.function.description.clone().unwrap_or_default(),
+                    parameters: t.function.parameters.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-            ConnectedIntegration {
-                toolkit: slug.clone(),
-                description: toolkit_description(slug).to_string(),
-                tools,
-                connected,
-            }
-        })
-        .collect();
+        integrations.push(ConnectedIntegration {
+            toolkit: slug.clone(),
+            description: toolkit_description(slug).to_string(),
+            tools,
+            connected,
+        });
+    }
 
     integrations.sort_by(|a, b| a.toolkit.cmp(&b.toolkit));
 
@@ -637,6 +677,60 @@ async fn fetch_connected_integrations_uncached(
     }
 
     Some(integrations)
+}
+
+/// Just-in-time fetch of every available action for a single Composio
+/// toolkit, returned in the [`ConnectedIntegrationTool`] shape the
+/// `integrations_agent` spawn path expects.
+///
+/// Unlike [`fetch_connected_integrations`] (which bulk-fetches every
+/// connected toolkit's tools once per session and caches the result),
+/// this helper is uncached and scoped to a single toolkit — meant to
+/// be called at `integrations_agent` spawn time so the sub-agent's
+/// prompt always reflects the toolkit's current action catalogue.
+///
+/// The filter `starts_with("{TOOLKIT}_")` matches
+/// `fetch_connected_integrations_uncached`'s own namespacing rule so
+/// siblings like `github` / `git` don't leak into each other's buckets.
+///
+/// Returns an empty vec when the backend has no actions for the
+/// toolkit (valid steady state for a freshly-authorised integration
+/// whose catalogue hasn't been published yet). Returns `Err` only for
+/// transport / auth failures the caller should surface to the user.
+pub async fn fetch_toolkit_actions(
+    client: &ComposioClient,
+    toolkit: &str,
+) -> anyhow::Result<Vec<ConnectedIntegrationTool>> {
+    let toolkit_slug = toolkit.trim();
+    if toolkit_slug.is_empty() {
+        anyhow::bail!("fetch_toolkit_actions: toolkit must not be empty");
+    }
+    tracing::debug!(toolkit = %toolkit_slug, "[composio] fetch_toolkit_actions");
+    let resp = client
+        .list_tools(Some(&[toolkit_slug.to_string()]))
+        .await
+        .map_err(|e| anyhow::anyhow!("list_tools failed for toolkit `{toolkit_slug}`: {e}"))?;
+    let action_prefix = format!("{}_", toolkit_slug.to_uppercase());
+    // Apply curated whitelist + user scope so spawn-time tool
+    // discovery agrees with the bulk path and the meta-tool layer.
+    let pref = super::providers::load_user_scope_or_default(toolkit_slug).await;
+    let actions: Vec<ConnectedIntegrationTool> = resp
+        .tools
+        .into_iter()
+        .filter(|t| t.function.name.starts_with(&action_prefix))
+        .filter(|t| super::providers::is_action_visible_with_pref(&t.function.name, &pref))
+        .map(|t| ConnectedIntegrationTool {
+            name: t.function.name,
+            description: t.function.description.unwrap_or_default(),
+            parameters: t.function.parameters,
+        })
+        .collect();
+    tracing::debug!(
+        toolkit = %toolkit_slug,
+        action_count = actions.len(),
+        "[composio] fetch_toolkit_actions: done"
+    );
+    Ok(actions)
 }
 
 #[cfg(test)]

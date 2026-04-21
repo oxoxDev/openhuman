@@ -21,6 +21,25 @@ fn default_config_and_workspace_dirs() -> Result<(PathBuf, PathBuf)> {
     Ok((config_dir.clone(), config_dir.join("workspace")))
 }
 
+/// Parse a boolean env-var value. Accepts the usual truthy/falsy tokens
+/// (`1/true/yes/on` and `0/false/no/off`, case-insensitive). Returns `None`
+/// on unrecognised values and logs a warning so silent mis-spellings don't
+/// invisibly leave the config unchanged.
+fn parse_env_bool(name: &str, raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            tracing::warn!(
+                env = %name,
+                value = %raw,
+                "invalid boolean env override ignored; expected 1/true/yes/on or 0/false/no/off"
+            );
+            None
+        }
+    }
+}
+
 const ACTIVE_WORKSPACE_STATE_FILE: &str = "active_workspace.toml";
 static WARNED_WORLD_READABLE_CONFIGS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -628,10 +647,17 @@ impl Config {
             }
         }
 
-        if let Ok(enabled) = std::env::var("OPENHUMAN_WEB_SEARCH_ENABLED")
-            .or_else(|_| std::env::var("WEB_SEARCH_ENABLED"))
-        {
-            self.web_search.enabled = enabled == "1" || enabled.eq_ignore_ascii_case("true");
+        // `OPENHUMAN_WEB_SEARCH_ENABLED` is intentionally ignored —
+        // web search is unconditionally registered in the tool set.
+        // Only the provider / API-key / budget knobs remain
+        // environment-configurable. Emit a one-shot deprecation warning
+        // if the caller still sets it so stale scripts surface clearly.
+        if std::env::var_os("OPENHUMAN_WEB_SEARCH_ENABLED").is_some() {
+            log::warn!(
+                "[config] OPENHUMAN_WEB_SEARCH_ENABLED is deprecated and ignored — \
+                 web search is always registered; use OPENHUMAN_WEB_SEARCH_PROVIDER / \
+                 API-key / budget env vars instead."
+            );
         }
 
         if let Ok(provider) = std::env::var("OPENHUMAN_WEB_SEARCH_PROVIDER")
@@ -783,6 +809,30 @@ impl Config {
                         "ignoring invalid OPENHUMAN_LOCAL_AI_TIER (valid: ram_1gb, ram_2_4gb, ram_4_8gb, ram_8_16gb, ram_16_plus_gb)"
                     );
                 }
+            }
+        }
+
+        // Node runtime overrides
+        if let Ok(flag) = std::env::var("OPENHUMAN_NODE_ENABLED") {
+            if let Some(enabled) = parse_env_bool("OPENHUMAN_NODE_ENABLED", &flag) {
+                self.node.enabled = enabled;
+            }
+        }
+        if let Ok(version) = std::env::var("OPENHUMAN_NODE_VERSION") {
+            let trimmed = version.trim();
+            if !trimmed.is_empty() {
+                self.node.version = trimmed.to_string();
+            }
+        }
+        if let Ok(dir) = std::env::var("OPENHUMAN_NODE_CACHE_DIR") {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                self.node.cache_dir = trimmed.to_string();
+            }
+        }
+        if let Ok(flag) = std::env::var("OPENHUMAN_NODE_PREFER_SYSTEM") {
+            if let Some(prefer_system) = parse_env_bool("OPENHUMAN_NODE_PREFER_SYSTEM", &flag) {
+                self.node.prefer_system = prefer_system;
             }
         }
 
@@ -1403,26 +1453,6 @@ mod tests {
         assert_eq!(cfg.runtime.reasoning_enabled, Some(false));
         unsafe {
             std::env::remove_var("OPENHUMAN_REASONING_ENABLED");
-        }
-    }
-
-    #[test]
-    fn apply_env_overrides_web_search_enabled_parses_values() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_env(&["OPENHUMAN_WEB_SEARCH_ENABLED", "WEB_SEARCH_ENABLED"]);
-        let mut cfg = Config::default();
-        unsafe {
-            std::env::set_var("OPENHUMAN_WEB_SEARCH_ENABLED", "true");
-        }
-        cfg.apply_env_overrides();
-        assert!(cfg.web_search.enabled);
-        unsafe {
-            std::env::set_var("OPENHUMAN_WEB_SEARCH_ENABLED", "0");
-        }
-        cfg.apply_env_overrides();
-        assert!(!cfg.web_search.enabled);
-        unsafe {
-            std::env::remove_var("OPENHUMAN_WEB_SEARCH_ENABLED");
         }
     }
 

@@ -1,147 +1,39 @@
-//! Sub-agent execution runner.
+//! Sub-agent execution entry points and the inner tool-call loop.
 //!
-//! Given an [`AgentDefinition`] and a task prompt, this module:
+//! The public runner lives in [`run_subagent`]. It dispatches to
+//! [`run_typed_mode`] (narrow prompt + filtered tools) or
+//! [`run_fork_mode`] (prefix-replay) depending on the
+//! [`super::types::SubagentMode`] implied by the
+//! [`crate::openhuman::agent::harness::definition::AgentDefinition`].
 //!
-//! 1. Reads the [`ParentExecutionContext`] task-local set by the parent
-//!    [`crate::openhuman::agent::Agent::turn`].
-//! 2. Resolves the sub-agent's model name (inherit / hint / exact).
-//! 3. Filters the parent's tool registry per `definition.tools`,
-//!    `disallowed_tools`, and `skill_filter` (or, in `fork` mode,
-//!    inherits the parent's tools verbatim).
-//! 4. Builds a narrow system prompt that strips the sections the
-//!    definition asks to omit (`omit_identity`, `omit_memory_context`,
-//!    `omit_safety_preamble`, `omit_skills_catalog`).
-//! 5. Runs a slim inner tool-call loop using the parent's
-//!    [`crate::openhuman::providers::Provider`] and returns a single
-//!    text result. The intra-sub-agent history never leaks back to the
-//!    parent — the parent only sees one compact tool result.
-//!
-//! Token-saving levers in this runner:
-//! - **Narrow prompt** — typed sub-agents skip identity/memory/skills.
-//! - **Filtered tools** — fewer schemas in the request body.
-//! - **Cheaper model** — archetype hint usually selects a smaller model.
-//! - **Lower max iterations** — definition-controlled per archetype.
-//! - **No memory recall** — sub-agents skip per-turn memory loading entirely;
-//!   the parent has already injected the relevant context.
-//! - **Structural compaction** — sub-agent's tool-call history collapses
-//!   into a single tool result block in the parent's history.
-//! - **Fork-mode prefix replay** — `uses_fork_context` definitions
-//!   replay the parent's exact bytes for backend prefix-cache hits.
+//! Both modes delegate to [`run_inner_loop`] which drives provider
+//! calls and tool execution until the model returns without further
+//! tool calls (or the iteration budget is exhausted).
 
-use super::definition::{AgentDefinition, PromptSource, ToolScope};
-use super::fork_context::{current_fork, current_parent, ForkContext, ParentExecutionContext};
-use super::session::transcript;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use super::super::fork_context::{
+    current_fork, current_parent, ForkContext, ParentExecutionContext,
+};
+use super::super::session::transcript;
+use super::extract_tool::ExtractFromResultTool;
+use super::handoff::{
+    build_handoff_placeholder, clean_tool_output, ResultHandoffCache,
+    HANDOFF_OVERSIZE_THRESHOLD_TOKENS,
+};
+use super::tool_prep::{
+    build_text_mode_tool_instructions, filter_tool_indices, is_subagent_spawn_tool,
+    is_welcome_only_tool, load_prompt_source, top_k_for_toolkit,
+};
+use super::types::{SubagentMode, SubagentRunError, SubagentRunOptions, SubagentRunOutcome};
+use crate::openhuman::agent::harness::definition::{AgentDefinition, PromptSource};
 use crate::openhuman::context::prompt::{
-    extract_cache_boundary, render_subagent_system_prompt, SubagentRenderOptions,
+    render_subagent_system_prompt, PromptContext, PromptTool, SubagentRenderOptions,
 };
 use crate::openhuman::providers::{ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::openhuman::tools::{Tool, ToolCategory, ToolSpec};
-use std::collections::HashSet;
-use std::path::Path;
-use std::time::{Duration, Instant};
-use thiserror::Error;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Per-spawn options that override or augment what the
-/// [`AgentDefinition`] specifies. Built by `SpawnSubagentTool::execute`
-/// from the parent model's call arguments.
-#[derive(Debug, Clone, Default)]
-pub struct SubagentRunOptions {
-    /// Optional skill-id override (e.g. `"notion"`). When set, the
-    /// resolved tool list is further restricted to tools whose name
-    /// starts with `{skill}__`. Overrides `definition.skill_filter`.
-    pub skill_filter_override: Option<String>,
-
-    /// Optional category override. When set, replaces
-    /// `definition.category_filter` for this single spawn. Useful when
-    /// the parent wants to reuse a generic definition but scope it to
-    /// skill or system tools for this specific call.
-    pub category_filter_override: Option<ToolCategory>,
-
-    /// Optional Composio toolkit scope (e.g. `"gmail"`, `"notion"`).
-    /// When set, skill-category tools are further restricted to those
-    /// whose name starts with the uppercased `{toolkit}_` prefix, and
-    /// the sub-agent's rendered `Connected Integrations` section is
-    /// narrowed to only that toolkit's entry. Used by main/orchestrator
-    /// when spawning `skills_agent` for a specific platform so the
-    /// sub-agent only sees one integration's tool catalogue.
-    pub toolkit_override: Option<String>,
-
-    /// Optional context blob the parent wants to inject before the
-    /// task prompt. Rendered as a `[Context]\n…\n` prefix.
-    pub context: Option<String>,
-
-    /// Stable id for tracing / DomainEvents (defaults to a UUID).
-    pub task_id: Option<String>,
-}
-
-/// Outcome of a single sub-agent run, returned to the parent.
-#[derive(Debug, Clone)]
-pub struct SubagentRunOutcome {
-    /// Unique identifier for this sub-task run.
-    pub task_id: String,
-    /// The ID of the agent archetype used (e.g., `researcher`).
-    pub agent_id: String,
-    /// The final text response produced by the sub-agent.
-    pub output: String,
-    /// How many LLM round-trips were performed during the run.
-    pub iterations: usize,
-    /// Total wall-clock duration of the run.
-    pub elapsed: Duration,
-    /// Which execution mode was used (Typed vs. Fork).
-    pub mode: SubagentMode,
-}
-
-/// Which prompt-construction path the runner took for a sub-agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubagentMode {
-    /// Built a narrow, archetype-specific prompt with filtered tools.
-    Typed,
-    /// Replayed the parent's exact rendered prompt and history prefix.
-    Fork,
-}
-
-impl SubagentMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Typed => "typed",
-            Self::Fork => "fork",
-        }
-    }
-}
-
-/// Errors the runner can surface to the parent. The parent receives a
-/// stringified version inside a tool result block.
-#[derive(Debug, Error)]
-pub enum SubagentRunError {
-    #[error("spawn_subagent called outside of an agent turn — no parent context available")]
-    NoParentContext,
-
-    #[error(
-        "fork-mode sub-agent requested but no ForkContext is set on the task-local. \
-         Did the parent agent forget to call `Agent::turn` with fork support?"
-    )]
-    NoForkContext,
-
-    #[error("agent definition '{0}' not found in registry")]
-    DefinitionNotFound(String),
-
-    #[error("failed to load archetype prompt from '{path}': {source}")]
-    PromptLoad {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("provider call failed: {0}")]
-    Provider(#[from] anyhow::Error),
-
-    #[error("sub-agent exceeded maximum iterations ({0})")]
-    MaxIterationsExceeded(usize),
-}
 
 /// Run a sub-agent based on its definition and a task prompt.
 ///
@@ -211,18 +103,17 @@ async fn run_typed_mode(
 ) -> Result<SubagentRunOutcome, SubagentRunError> {
     let started = Instant::now();
 
-    // ── Resolve archetype prompt body ──────────────────────────────────
-    let archetype_prompt_body =
-        load_prompt_source(&definition.system_prompt, &parent.workspace_dir)?;
-
     // ── Resolve model + temperature ────────────────────────────────────
     let model = definition.model.resolve(&parent.model_name);
     let temperature = definition.temperature;
 
+    // Archetype prompt loading is deferred until AFTER tool filtering so
+    // dynamic builders receive the final, filtered tool list (rather
+    // than the parent's full registry). The actual
+    // `load_prompt_source(...)` call lives just above
+    // `render_subagent_system_prompt` below.
+
     // ── Filter tools per definition + per-spawn override ───────────────
-    let category_filter = options
-        .category_filter_override
-        .or(definition.category_filter);
     let toolkit_filter = options.toolkit_override.as_deref();
     let mut allowed_indices = filter_tool_indices(
         &parent.all_tools,
@@ -232,12 +123,69 @@ async fn run_typed_mode(
             .skill_filter_override
             .as_deref()
             .or(definition.skill_filter.as_deref()),
-        category_filter,
     );
 
-    // ── Dynamic per-action toolkit tools (skills_agent + toolkit) ──────
+    // `complete_onboarding` is a welcome-only tool — it flips the
+    // onboarding-complete flag in workspace config and is meaningless
+    // (and potentially destructive) from any other agent. Strip it
+    // from every non-welcome subagent regardless of their scope.
+    if definition.id != "welcome" {
+        allowed_indices.retain(|&i| !is_welcome_only_tool(parent.all_tools[i].name()));
+    }
+
+    // Sub-agents must never spawn their own sub-agents. Nested spawns
+    // create a recursion tree the harness doesn't budget, observe, or
+    // cost-attribute — and historically produced runaway dispatch loops
+    // (e.g. summarizer → summarizer → …). The orchestrator is the only
+    // node that delegates; every archetype running here is, by
+    // definition, a sub-agent. Strip `spawn_subagent` and every
+    // synthesised `delegate_*` tool regardless of the archetype's
+    // declared scope. This is belt-and-braces: archetype definitions
+    // should not list these tools either, but we enforce it here so a
+    // misconfigured TOML can't bypass the rule.
+    let before = allowed_indices.len();
+    allowed_indices.retain(|&i| !is_subagent_spawn_tool(parent.all_tools[i].name()));
+    let stripped = before - allowed_indices.len();
+    if stripped > 0 {
+        tracing::debug!(
+            agent_id = %definition.id,
+            stripped,
+            "[subagent_runner] removed sub-agent spawn tools from sub-agent's tool surface"
+        );
+    }
+
+    // ── Force-include extra_tools ──────────────────────────────────────
     //
-    // When `skills_agent` is spawned with a `toolkit` argument (e.g.
+    // `extra_tools` is a simple "also include these" hook that bypasses
+    // [`ToolScope`] / [`AgentDefinition::skill_filter`] but still honours
+    // `disallowed_tools`. Historically this was the bypass list for the
+    // now-removed `category_filter`; it remains useful for custom
+    // definitions that want to add a couple of named tools on top of a
+    // narrow scope.
+    if !definition.extra_tools.is_empty() {
+        let disallow_set: std::collections::HashSet<&str> = definition
+            .disallowed_tools
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        for (i, tool) in parent.all_tools.iter().enumerate() {
+            let name = tool.name();
+            if definition.extra_tools.iter().any(|n| n == name)
+                && !allowed_indices.contains(&i)
+                && !disallow_set.contains(name)
+                // `extra_tools` cannot be used to bypass the sub-agent
+                // spawn guard above — a stray TOML entry listing
+                // `spawn_subagent` there must still be dropped.
+                && !is_subagent_spawn_tool(name)
+            {
+                allowed_indices.push(i);
+            }
+        }
+    }
+
+    // ── Dynamic per-action toolkit tools (integrations_agent + toolkit) ──────
+    //
+    // When `integrations_agent` is spawned with a `toolkit` argument (e.g.
     // `toolkit="gmail"`), build one [`ComposioActionTool`] per action
     // in that toolkit and inject them into the sub-agent's tool list.
     // Each carries the action's real JSON schema, so the LLM's native
@@ -249,28 +197,80 @@ async fn run_typed_mode(
     // are stripped from the parent-filtered indices in this path so
     // the model only sees one way to call each action.
     let mut dynamic_tools: Vec<Box<dyn Tool>> = Vec::new();
-    let is_skills_agent_with_toolkit = definition.id == "skills_agent" && toolkit_filter.is_some();
-    if is_skills_agent_with_toolkit {
-        // Drop EVERY skill-category parent tool. In the new
-        // architecture all integration discovery / authorization /
-        // dispatching is the orchestrator's responsibility (via the
-        // Delegation Guide and `spawn_subagent` pre-flight). The
-        // sub-agent's only job is to execute per-action tools for
-        // its bound toolkit, so leftover meta-tools (composio_*,
-        // apify_*, other-toolkit dispatchers) are pure noise that
-        // confuses the model and wastes tokens.
+    let is_integrations_agent_with_toolkit =
+        definition.id == "integrations_agent" && toolkit_filter.is_some();
+
+    // `tools_agent` is the Composio-free counterpart to
+    // `integrations_agent`: it inherits the orchestrator's wildcard
+    // scope but must never see Skill-category tools. Stripping them
+    // here (before any dynamic additions) keeps the parent-fed
+    // `allowed_indices` clean of composio_* meta-tools and
+    // toolkit-specific action tools. Delegation to integrations_agent
+    // is the orchestrator's job, not this agent's.
+    if definition.id == "tools_agent" {
         allowed_indices.retain(|&i| parent.all_tools[i].category() != ToolCategory::Skill);
+    }
+
+    if is_integrations_agent_with_toolkit {
+        // Tool visibility is fully governed by the TOML scope
+        // (`agent.tools.named = [...]` on the integrations_agent
+        // definition) plus the dynamic per-action ComposioActionTools
+        // injected below. Anything the agent author explicitly named
+        // in the TOML is kept as-is — no extra stripping here.
+        // Previously we dropped every Skill-category tool at this
+        // point, which also dropped `composio_list_tools` /
+        // `composio_execute` whenever they were declared in the TOML,
+        // making the TOML changes look like no-ops.
 
         if let (Some(tk), Some(client)) = (toolkit_filter, parent.composio_client.as_ref()) {
             // The spawn_subagent pre-flight already verified the
             // toolkit is in the allowlist AND has an active
             // connection, so the matching entry must be present and
             // marked connected. Defensive lookup anyway.
-            if let Some(integration) = parent
+            if let Some(cached_integration) = parent
                 .connected_integrations
                 .iter()
                 .find(|ci| ci.connected && ci.toolkit.eq_ignore_ascii_case(tk))
             {
+                // Refresh the toolkit's action catalogue at spawn time
+                // by calling `composio_list_tools` for the bound toolkit.
+                // The cached list on `parent.connected_integrations`
+                // comes from the session-start bulk fetch, which can
+                // return zero actions for some toolkits even when the
+                // per-toolkit endpoint returns a full catalogue. Falling
+                // back to the cached list preserves the previous
+                // behaviour on network failure.
+                let fresh_actions = match crate::openhuman::composio::fetch_toolkit_actions(
+                    client, tk,
+                )
+                .await
+                {
+                    Ok(actions) if !actions.is_empty() => actions,
+                    Ok(_) => {
+                        tracing::debug!(
+                            agent_id = %definition.id,
+                            toolkit = %tk,
+                            "[subagent_runner:typed] fresh list_tools returned empty; falling back to cached catalogue"
+                        );
+                        cached_integration.tools.clone()
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %definition.id,
+                            toolkit = %tk,
+                            error = %e,
+                            "[subagent_runner:typed] fresh list_tools failed; falling back to cached catalogue"
+                        );
+                        cached_integration.tools.clone()
+                    }
+                };
+                let integration = crate::openhuman::context::prompt::ConnectedIntegration {
+                    toolkit: cached_integration.toolkit.clone(),
+                    description: cached_integration.description.clone(),
+                    tools: fresh_actions,
+                    connected: cached_integration.connected,
+                };
+                let integration = &integration;
                 // Fuzzy-filter the toolkit's actions against the task prompt
                 // so large catalogues (e.g. github ~500 actions) are narrowed
                 // to the handful actually relevant to this delegation. The
@@ -278,23 +278,34 @@ async fn run_typed_mode(
                 // prompt to be a clear, context-rich instruction, so it's a
                 // reliable matching target.
                 //
+                // Heavy-schema toolkits (Gmail, Notion, GitHub, Salesforce,
+                // HubSpot, Google Workspace, Microsoft Teams) ship per-action
+                // JSON schemas so dense that even a moderate top-K blows the
+                // request past Fireworks' 65 535-rule grammar cap in native
+                // mode and the 196 607-token context cap in text mode. Tight
+                // top-K of 12 keeps those toolkits inside both ceilings while
+                // still giving the fuzzy scorer room for adjacent matches.
+                // Lighter toolkits (reddit, slack, linear, telegram, …) keep
+                // the looser top-K of 25.
+                //
                 // Fallback: if the filter yields fewer than
                 // `MIN_CONFIDENT_HITS` results, register every action. A
                 // too-narrow filter is worse than none — it starves the
                 // sub-agent and forces it to guess.
-                const TOOL_FILTER_TOP_K: usize = 25;
-                let filter_hits = super::tool_filter::filter_actions_by_prompt(
+                let top_k = top_k_for_toolkit(tk);
+                let filter_hits = super::super::tool_filter::filter_actions_by_prompt(
                     task_prompt,
                     &integration.tools,
-                    TOOL_FILTER_TOP_K,
+                    top_k,
                 );
                 let selected: Vec<&crate::openhuman::context::prompt::ConnectedIntegrationTool> =
-                    if filter_hits.len() >= super::tool_filter::MIN_CONFIDENT_HITS {
+                    if filter_hits.len() >= super::super::tool_filter::MIN_CONFIDENT_HITS {
                         tracing::info!(
                             agent_id = %definition.id,
                             toolkit = %tk,
                             total = integration.tools.len(),
                             kept = filter_hits.len(),
+                            top_k = top_k,
                             "[subagent_runner:typed] fuzzy tool filter narrowed toolkit"
                         );
                         filter_hits.iter().map(|&i| &integration.tools[i]).collect()
@@ -340,6 +351,55 @@ async fn run_typed_mode(
         }
     }
 
+    // ── Progressive-disclosure handoff cache ───────────────────────────
+    //
+    // Built only for integrations_agent-with-toolkit because that's the only
+    // typed sub-agent that regularly calls external tools capable of
+    // returning megabyte-scale payloads (Composio actions). Every other
+    // typed sub-agent gets `None` and its tool results stay inline.
+    //
+    // When enabled, oversized tool results get stashed into this cache
+    // and their place in history is taken by a short placeholder (see
+    // `build_handoff_placeholder`). The sub-agent can then call the
+    // companion `extract_from_result` tool below to run a direct
+    // provider call against the cached payload with a targeted query.
+    // Lazy / pay-per-question, so trivial asks answerable from the
+    // preview don't pay any extra LLM cost.
+    let handoff_cache: Option<Arc<ResultHandoffCache>> = if is_integrations_agent_with_toolkit {
+        let cache = Arc::new(ResultHandoffCache::new());
+
+        // `extract_from_result` is now a pure tool — it takes the
+        // parent's provider and calls `chat_with_system` directly
+        // against the extraction model, instead of spawning the
+        // `summarizer` sub-agent. Removes an entire layer of harness
+        // scaffolding (system prompt assembly, tool-loop, recursion
+        // guards) that this workload never needed.
+        //
+        // Transcript plumbing: the extraction LLM still costs tokens,
+        // so each call writes a self-contained transcript under
+        // `session_raw/DDMMYYYY/` (and its companion `.md`) keyed by
+        // the parent chain, to match the rest of the session tree.
+        let parent_chain = match parent.session_parent_prefix.as_deref() {
+            Some(prefix) => format!("{}__{}", prefix, parent.session_key),
+            None => parent.session_key.clone(),
+        };
+        dynamic_tools.push(Box::new(ExtractFromResultTool::new(
+            cache.clone(),
+            parent.provider.clone(),
+            parent.workspace_dir.clone(),
+            parent_chain,
+            definition.id.clone(),
+        )));
+        tracing::debug!(
+            agent_id = %definition.id,
+            "[subagent_runner:typed] registered extract_from_result tool + handoff cache"
+        );
+
+        Some(cache)
+    } else {
+        None
+    };
+
     let mut filtered_specs: Vec<ToolSpec> = allowed_indices
         .iter()
         .map(|&i| parent.all_tool_specs[i].clone())
@@ -376,7 +436,7 @@ async fn run_typed_mode(
     // Per-definition omit_* flags are threaded through via
     // `SubagentRenderOptions` — previously the narrow renderer
     // hard-coded all three as "omit", which silently downgraded
-    // definitions like `code_executor` / `tool_maker` / `skills_agent`
+    // definitions like `code_executor` / `tool_maker` / `integrations_agent`
     // that set `omit_safety_preamble = false`.
     let render_options = SubagentRenderOptions::from_definition_flags(
         definition.omit_identity,
@@ -406,19 +466,96 @@ async fn run_typed_mode(
                 .cloned()
                 .collect(),
         };
-    let rendered_prompt = extract_cache_boundary(&render_subagent_system_prompt(
-        &parent.workspace_dir,
-        &model,
-        &allowed_indices,
-        &parent.all_tools,
-        &dynamic_tools,
-        &archetype_prompt_body,
-        render_options,
-        parent.tool_call_format,
-        &narrowed_integrations,
-    ));
-    let system_prompt = rendered_prompt.text;
-    let system_prompt_cache_boundary = rendered_prompt.cache_boundary;
+    // ── Resolve archetype prompt body (post-filter) ────────────────────
+    //
+    // Build a live [`PromptContext`] — same shape the main agent uses
+    // on every turn — so `Dynamic` builders can compose the full
+    // system prompt via the section helpers in
+    // [`crate::openhuman::context::prompt`]. `Inline` / `File` sources
+    // continue to use the legacy `render_subagent_system_prompt`
+    // wrapper.
+    let prompt_tools: Vec<PromptTool<'_>> = allowed_indices
+        .iter()
+        .map(|&i| {
+            let t = parent.all_tools[i].as_ref();
+            PromptTool {
+                name: t.name(),
+                description: t.description(),
+                parameters_schema: Some(t.parameters_schema().to_string()),
+            }
+        })
+        .chain(dynamic_tools.iter().map(|t| PromptTool {
+            name: t.name(),
+            description: t.description(),
+            parameters_schema: Some(t.parameters_schema().to_string()),
+        }))
+        .collect();
+    // Derive the visible-tool set from the prompt tool list so prompt
+    // sections that gate on `visible_tool_names` (e.g. tool-protocol
+    // notes) see exactly what the model sees, rather than an empty set.
+    let visible_tool_names: std::collections::HashSet<String> =
+        prompt_tools.iter().map(|t| t.name.to_string()).collect();
+    // Match the main-agent turn (`session/turn.rs::build_system_prompt`)
+    // by supplying the dispatcher's protocol instructions here. Dynamic
+    // prompt builders route tools through `render_tools(ctx)`, which
+    // appends `ctx.dispatcher_instructions` after the tool catalogue —
+    // passing an empty string drops the `## Tool Use Protocol` block and
+    // leaves PFormat/Json sub-agents with no call-format guidance.
+    let dispatcher_instructions = {
+        use crate::openhuman::agent::dispatcher::{
+            NativeToolDispatcher, PFormatToolDispatcher, ToolDispatcher, XmlToolDispatcher,
+        };
+        use crate::openhuman::agent::pformat::PFormatRegistry;
+        use crate::openhuman::context::prompt::ToolCallFormat;
+        let empty_tools: Vec<Box<dyn Tool>> = Vec::new();
+        match parent.tool_call_format {
+            ToolCallFormat::PFormat => {
+                PFormatToolDispatcher::new(PFormatRegistry::new()).prompt_instructions(&empty_tools)
+            }
+            ToolCallFormat::Native => NativeToolDispatcher.prompt_instructions(&empty_tools),
+            ToolCallFormat::Json => XmlToolDispatcher.prompt_instructions(&empty_tools),
+        }
+    };
+    let prompt_ctx = PromptContext {
+        workspace_dir: &parent.workspace_dir,
+        model_name: &model,
+        agent_id: &definition.id,
+        tools: &prompt_tools,
+        skills: &parent.skills,
+        dispatcher_instructions: &dispatcher_instructions,
+        learned: crate::openhuman::context::prompt::LearnedContextData::default(),
+        visible_tool_names: &visible_tool_names,
+        tool_call_format: parent.tool_call_format,
+        connected_integrations: &narrowed_integrations,
+        include_profile: !definition.omit_profile,
+        include_memory_md: !definition.omit_memory_md,
+    };
+
+    let system_prompt = match &definition.system_prompt {
+        PromptSource::Dynamic(build) => {
+            // Function-driven builder returns the final prompt text.
+            build(&prompt_ctx).map_err(|e| SubagentRunError::PromptLoad {
+                path: format!("<dynamic:{}>", definition.id),
+                source: std::io::Error::other(e.to_string()),
+            })?
+        }
+        PromptSource::Inline(_) | PromptSource::File { .. } => {
+            // Legacy path for TOML-authored agents: load the raw body,
+            // then wrap it with the canonical section layout.
+            let archetype_prompt_body = load_prompt_source(&definition.system_prompt, &prompt_ctx)?;
+            render_subagent_system_prompt(
+                &parent.workspace_dir,
+                &model,
+                &allowed_indices,
+                &parent.all_tools,
+                &dynamic_tools,
+                &archetype_prompt_body,
+                render_options,
+                parent.tool_call_format,
+                &narrowed_integrations,
+            )
+        }
+    };
 
     // ── Build the user message (with optional context prefix) ──────────
     // Merge explicit orchestrator context with the parent's auto-loaded
@@ -445,7 +582,10 @@ async fn run_typed_mode(
     ];
 
     // ── Run the inner tool-call loop ───────────────────────────────────
-    let (output, iterations, agg_usage) = run_inner_loop(
+    // Transcript persistence lives INSIDE the loop (one write per
+    // provider response), mirroring the main-agent turn loop in
+    // `session/turn.rs`. No post-loop write needed here.
+    let (output, iterations, _agg_usage) = run_inner_loop(
         parent.provider.as_ref(),
         &mut history,
         &parent.all_tools,
@@ -455,19 +595,12 @@ async fn run_typed_mode(
         &model,
         temperature,
         definition.max_iterations,
-        system_prompt_cache_boundary,
         task_id,
         &definition.id,
+        handoff_cache.as_deref(),
+        parent,
     )
     .await?;
-
-    persist_subagent_transcript(
-        &parent.workspace_dir,
-        &definition.id,
-        &history,
-        system_prompt_cache_boundary,
-        &agg_usage,
-    );
 
     Ok(SubagentRunOutcome {
         task_id: task_id.to_string(),
@@ -508,7 +641,6 @@ async fn run_fork_mode(
     tracing::debug!(
         agent_id = %definition.id,
         prefix_len = fork.message_prefix.len(),
-        cache_boundary = ?fork.cache_boundary,
         "[subagent_runner:fork] replaying parent prefix"
     );
 
@@ -531,10 +663,20 @@ async fn run_fork_mode(
     // request body matches the prefix the backend has already cached.
     // Runtime execution still resolves against the parent's live tool
     // registry.
+    //
+    // Sub-agents (including fork-mode ones) must not spawn their own
+    // sub-agents — the rule that applies in `run_typed_mode`'s filter
+    // applies here too. We keep `spawn_subagent` / `delegate_*` in
+    // `fork.tool_specs` so the prefix bytes still match the parent's
+    // cached body (mutating the specs would defeat the whole point of
+    // fork mode), and instead drop them from `allowed_names` so the
+    // runtime rejects any attempt to call them with the usual
+    // "not in allowlist" path.
     let allowed_names: HashSet<String> = parent
         .all_tools
         .iter()
         .map(|t| t.name().to_string())
+        .filter(|name| !is_subagent_spawn_tool(name))
         .collect();
 
     let model = parent.model_name.clone();
@@ -545,7 +687,9 @@ async fn run_fork_mode(
     // Fork mode replays the parent's exact tool list — no dynamic
     // toolkit-scoped tools, so `extra_tools` is empty.
     let fork_extra_tools: Vec<Box<dyn Tool>> = Vec::new();
-    let (output, iterations, agg_usage) = run_inner_loop(
+    // Transcript persistence happens per-iteration inside
+    // `run_inner_loop`; no post-loop write needed.
+    let (output, iterations, _agg_usage) = run_inner_loop(
         parent.provider.as_ref(),
         &mut history,
         &parent.all_tools,
@@ -555,19 +699,12 @@ async fn run_fork_mode(
         &model,
         temperature,
         max_iterations,
-        fork.cache_boundary,
         task_id,
         &definition.id,
+        None,
+        parent,
     )
     .await?;
-
-    persist_subagent_transcript(
-        &parent.workspace_dir,
-        &definition.id,
-        &history,
-        fork.cache_boundary,
-        &agg_usage,
-    );
 
     Ok(SubagentRunOutcome {
         task_id: task_id.to_string(),
@@ -577,61 +714,6 @@ async fn run_fork_mode(
         elapsed: started.elapsed(),
         mode: SubagentMode::Fork,
     })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Session transcript persistence for sub-agents
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Best-effort: persist the sub-agent's conversation as a session transcript
-/// so it can be inspected for debugging and KV cache analysis.
-fn persist_subagent_transcript(
-    workspace_dir: &Path,
-    agent_id: &str,
-    history: &[ChatMessage],
-    cache_boundary: Option<usize>,
-    usage: &AggregatedUsage,
-) {
-    let path = match transcript::resolve_new_transcript_path(workspace_dir, agent_id) {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::debug!(
-                agent_id = %agent_id,
-                error = %err,
-                "[subagent_runner] failed to resolve transcript path"
-            );
-            return;
-        }
-    };
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let meta = transcript::TranscriptMeta {
-        agent_name: agent_id.to_string(),
-        dispatcher: "native".into(),
-        cache_boundary,
-        created: now.clone(),
-        updated: now,
-        turn_count: 1,
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cached_input_tokens: usage.cached_input_tokens,
-        charged_amount_usd: usage.charged_amount_usd,
-    };
-
-    if let Err(err) = transcript::write_transcript(&path, history, &meta) {
-        tracing::debug!(
-            agent_id = %agent_id,
-            error = %err,
-            "[subagent_runner] failed to write transcript"
-        );
-    } else {
-        tracing::debug!(
-            agent_id = %agent_id,
-            messages = history.len(),
-            path = %path.display(),
-            "[subagent_runner] transcript written"
-        );
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -668,19 +750,155 @@ async fn run_inner_loop(
     model: &str,
     temperature: f64,
     max_iterations: usize,
-    system_prompt_cache_boundary: Option<usize>,
     task_id: &str,
     agent_id: &str,
+    handoff_cache: Option<&ResultHandoffCache>,
+    parent: &ParentExecutionContext,
 ) -> Result<(String, usize, AggregatedUsage), SubagentRunError> {
     let max_iterations = max_iterations.max(1);
-    let supports_native = provider.supports_native_tools() && !tool_specs.is_empty();
+
+    // Sub-agent transcript stem — mirrors what
+    // `persist_subagent_transcript` used to compute on one-shot
+    // post-loop writes. We compute it once up front so **every
+    // iteration's** persist call resolves to the same file on disk:
+    //   `{parent_chain}__{unix_ts}_{agent_id}.jsonl`.
+    let child_session_key = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let unix_ts = now.as_secs();
+        // Nanos component + task_id suffix disambiguate sibling sub-agents
+        // spawned within the same wall-clock second (tests and fan-out
+        // flows routinely do this, and a shared stem would overwrite the
+        // earlier sibling's transcript file).
+        let nanos = now.subsec_nanos();
+        let sanitized: String = agent_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let task_suffix: String = task_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .take(12)
+            .collect();
+        if task_suffix.is_empty() {
+            format!("{unix_ts}_{nanos:09}_{sanitized}")
+        } else {
+            format!("{unix_ts}_{nanos:09}_{sanitized}_{task_suffix}")
+        }
+    };
+    let transcript_stem = {
+        let parent_chain = match parent.session_parent_prefix.as_deref() {
+            Some(prefix) => format!("{}__{}", prefix, parent.session_key),
+            None => parent.session_key.clone(),
+        };
+        format!("{parent_chain}__{child_session_key}")
+    };
+
+    // ── Text-mode override for integrations_agent ────────────────────────────
+    //
+    // Large Composio toolkits (Notion, Salesforce, HubSpot, GitHub) ship
+    // per-action JSON schemas that are extraordinarily dense — deeply
+    // nested object/block types, recursive refs, huge discriminated
+    // unions. Fireworks-style providers (which the backend forwards to)
+    // auto-compile every entry in `tools: [...]` into a grammar and
+    // index rules with a `uint16_t` — max 65 535 rules. Even with the
+    // upstream fuzzy filter narrowing Notion 48 → 16, a single request
+    // generates 100 000+ rules and the provider rejects it with 400
+    // before generation starts.
+    //
+    // The fuzzy filter can't fix this because the bound is per-action,
+    // not per-toolkit: one Notion schema alone can produce thousands of
+    // rules. The only client-side lever is to **not send `tools: [...]`
+    // at all** — the backend has nothing to compile, so no grammar, so
+    // no ceiling. We then describe the tools in the system prompt as
+    // prose (XmlToolDispatcher format) and parse `<tool_call>` tags out
+    // of the model's free-form response text.
+    //
+    // Scoped to `integrations_agent` because that's the only path where we
+    // pass Composio toolkit schemas. Every other typed sub-agent
+    // (welcome, researcher, summarizer, …) uses small built-in tool
+    // sets that stay well under the grammar ceiling and benefit from
+    // native mode's stricter formatting guarantees.
+    let force_text_mode = agent_id == "integrations_agent" && !tool_specs.is_empty();
+
+    let supports_native =
+        !force_text_mode && provider.supports_native_tools() && !tool_specs.is_empty();
     let request_tools = if supports_native {
         Some(tool_specs)
     } else {
         None
     };
 
+    if force_text_mode {
+        // Append the XML tool protocol + available-tool list to the
+        // existing system prompt. `history[0]` is the system message
+        // built by `run_typed_mode` / `run_fork_mode` upstream; we
+        // augment it in-place so the model learns the call format for
+        // this session without an extra message round-trip.
+        if let Some(sys) = history.iter_mut().find(|m| m.role == "system") {
+            sys.content.push_str("\n\n");
+            sys.content
+                .push_str(&build_text_mode_tool_instructions(tool_specs));
+        }
+        tracing::info!(
+            task_id = %task_id,
+            agent_id = %agent_id,
+            tool_count = tool_specs.len(),
+            "[subagent_runner:text-mode] omitting tools from API request, injected XML tool protocol into system prompt"
+        );
+    }
+
     let mut usage = AggregatedUsage::default();
+
+    // Per-iteration transcript persistence. Mirrors the main-agent
+    // turn loop: right after each provider response lands (and again
+    // after the final response is pushed) we flush the full history
+    // to disk. A crash during tool execution no longer erases the
+    // sub-agent's response — the bytes are on disk before any tool
+    // runs. Best-effort: write failures are logged at `debug` and the
+    // loop continues.
+    let persist_transcript = |history: &[ChatMessage], usage: &AggregatedUsage| {
+        let path = match transcript::resolve_keyed_transcript_path(
+            &parent.workspace_dir,
+            &transcript_stem,
+        ) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    error = %err,
+                    "[subagent_runner] failed to resolve transcript path"
+                );
+                return;
+            }
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let meta = transcript::TranscriptMeta {
+            agent_name: agent_id.to_string(),
+            dispatcher: "native".into(),
+            created: now.clone(),
+            updated: now,
+            turn_count: 1,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            charged_amount_usd: usage.charged_amount_usd,
+        };
+        if let Err(err) = transcript::write_transcript(&path, history, &meta, None) {
+            tracing::debug!(
+                agent_id = %agent_id,
+                error = %err,
+                "[subagent_runner] failed to write transcript"
+            );
+        }
+    };
 
     for iteration in 0..max_iterations {
         tracing::debug!(
@@ -696,7 +914,6 @@ async fn run_inner_loop(
                 ChatRequest {
                     messages: history.as_slice(),
                     tools: request_tools,
-                    system_prompt_cache_boundary,
                     stream: None,
                 },
                 model,
@@ -712,7 +929,37 @@ async fn run_inner_loop(
         }
 
         let response_text = resp.text.clone().unwrap_or_default();
-        let native_calls: Vec<ToolCall> = resp.tool_calls.clone();
+
+        // In text mode the model emits `<tool_call>{…}</tool_call>` tags
+        // inline inside `resp.text` (and `resp.tool_calls` is empty
+        // because we told the provider not to structure them). Parse
+        // them ourselves via the shared harness helper and synthesise a
+        // `ToolCall` per parsed block so the rest of the loop can stay
+        // uniform.
+        let native_calls: Vec<ToolCall> = if force_text_mode {
+            let (_cleaned, parsed) = super::super::parse::parse_tool_calls(&response_text);
+            parsed
+                .into_iter()
+                .enumerate()
+                .map(|(i, call)| {
+                    let args_str = if call.arguments.is_null() {
+                        "{}".to_string()
+                    } else {
+                        call.arguments.to_string()
+                    };
+                    ToolCall {
+                        id: call
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| format!("call_text_{iteration}_{i}")),
+                        name: call.name,
+                        arguments: args_str,
+                    }
+                })
+                .collect()
+        } else {
+            resp.tool_calls.clone()
+        };
 
         if native_calls.is_empty() {
             tracing::debug!(
@@ -723,23 +970,38 @@ async fn run_inner_loop(
                 "[subagent_runner] no tool calls — returning final response"
             );
             history.push(ChatMessage::assistant(response_text.clone()));
+            // Persist the final response before returning so the
+            // transcript always captures the last provider reply.
+            persist_transcript(history, &usage);
             return Ok((response_text, iteration + 1, usage));
         }
 
-        // Persist assistant message with the original tool_calls payload so
-        // subsequent role=tool messages can reference call ids correctly.
-        // Uses the canonical serialiser from `parse` — the old inline
-        // `build_native_assistant_payload` used `"text"` instead of
-        // `"content"` and nested `{"type":"function","function":{…}}`
-        // wrappers instead of flat `{id, name, arguments}`, which caused
-        // 400 errors from the backend jinja template ("Message has tool
-        // role, but there was no previous assistant message with a tool
-        // call!").
-        let assistant_history_content =
-            super::parse::build_native_assistant_history(&response_text, &native_calls);
-        history.push(ChatMessage::assistant(assistant_history_content));
+        // Persist the assistant turn. In native mode use the canonical
+        // serialiser (wraps text + structured tool_calls for the
+        // backend's jinja template). In text mode the raw response
+        // already contains the `<tool_call>` tags inline, so persist it
+        // verbatim — on the next turn the model sees its own prior
+        // emissions exactly as it wrote them.
+        if force_text_mode {
+            history.push(ChatMessage::assistant(response_text.clone()));
+        } else {
+            let assistant_history_content =
+                super::super::parse::build_native_assistant_history(&response_text, &native_calls);
+            history.push(ChatMessage::assistant(assistant_history_content));
+        }
 
-        // Execute each call, append role=tool messages.
+        // Persist the assistant response + tool-call intents **before**
+        // executing tools. If the session crashes mid-tool-call we
+        // still have what the model emitted on disk.
+        persist_transcript(history, &usage);
+
+        // Execute each call, collect outputs. Native mode pushes one
+        // `role=tool` message per call with the structured `tool_call_id`
+        // reference. Text mode has no such reference (the model just
+        // emitted tags in prose), so we batch all results into a single
+        // user message formatted with `<tool_result>` tags — mirroring
+        // XmlToolDispatcher's `format_results`.
+        let mut text_mode_result_block = String::new();
         for call in &native_calls {
             let result_text = if !allowed_names.contains(&call.name) {
                 tracing::warn!(
@@ -775,12 +1037,98 @@ async fn run_inner_loop(
                 format!("Unknown tool: {}", call.name)
             };
 
-            let tool_msg = serde_json::json!({
-                "tool_call_id": call.id,
-                "content": result_text,
-            });
-            history.push(ChatMessage::tool(tool_msg.to_string()));
+            // Progressive-disclosure handoff: if this spawn has a cache
+            // (integrations_agent-with-toolkit path) and the result is large
+            // and not itself an error / not from the extractor tool,
+            // stash the raw payload and replace it in history with a
+            // short placeholder. The sub-agent can drill in with
+            // `extract_from_result(result_id=..., query=...)` on the
+            // next turn. Errors and already-extracted output go through
+            // unchanged — no point handing off a 200-byte error or an
+            // already-compressed summary.
+            //
+            // Cleaning happens before the size check so HTML-heavy tool
+            // outputs (Gmail bodies, HTML-embedded Notion blocks) that
+            // drop below threshold after stripping markup skip the
+            // extract pipeline entirely. For anything still over
+            // threshold, the cache stores the cleaned text — chunks see
+            // real content, not `<div>` soup.
+            let result_text = if let Some(cache) = handoff_cache {
+                let skip_cleaning =
+                    call.name == "extract_from_result" || result_text.starts_with("Error");
+                let cleaned = if skip_cleaning {
+                    result_text
+                } else {
+                    let pre_len = result_text.len();
+                    let cleaned = clean_tool_output(&result_text);
+                    if cleaned.len() < pre_len {
+                        tracing::debug!(
+                            tool = %call.name,
+                            before_bytes = pre_len,
+                            after_bytes = cleaned.len(),
+                            saved_pct = ((pre_len - cleaned.len()) * 100) / pre_len.max(1),
+                            "[subagent_runner:handoff] cleaned tool output (stripped markup/data-uris/whitespace)"
+                        );
+                    }
+                    cleaned
+                };
+                let tokens = cleaned.len().div_ceil(4);
+                if !skip_cleaning && tokens > HANDOFF_OVERSIZE_THRESHOLD_TOKENS {
+                    let id = cache.store(call.name.clone(), cleaned.clone());
+                    let placeholder = build_handoff_placeholder(&call.name, &id, &cleaned);
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_id = %agent_id,
+                        tool = %call.name,
+                        raw_tokens = tokens,
+                        raw_bytes = cleaned.len(),
+                        threshold_tokens = HANDOFF_OVERSIZE_THRESHOLD_TOKENS,
+                        result_id = %id,
+                        "[subagent_runner:handoff] stashed oversized tool output; substituted placeholder into history"
+                    );
+                    placeholder
+                } else {
+                    cleaned
+                }
+            } else {
+                result_text
+            };
+
+            if force_text_mode {
+                let status = if result_text.starts_with("Error") {
+                    "error"
+                } else {
+                    "ok"
+                };
+                let _ = std::fmt::Write::write_fmt(
+                    &mut text_mode_result_block,
+                    format_args!(
+                        "<tool_result name=\"{}\" status=\"{}\">\n{}\n</tool_result>\n",
+                        call.name, status, result_text
+                    ),
+                );
+            } else {
+                let tool_msg = serde_json::json!({
+                    "tool_call_id": call.id,
+                    "content": result_text,
+                });
+                history.push(ChatMessage::tool(tool_msg.to_string()));
+            }
         }
+
+        if force_text_mode && !text_mode_result_block.is_empty() {
+            history.push(ChatMessage::user(format!(
+                "[Tool results]\n{text_mode_result_block}"
+            )));
+        }
+
+        // Persist again after tool results have been appended so the
+        // on-disk transcript reflects each round's complete
+        // assistant-intent + tool-result pair. Without this, a crash
+        // between `persist_transcript` at line ~1044 and the next
+        // iteration's provider call would leave the transcript without
+        // the tool outputs the next turn will be reasoning from.
+        persist_transcript(history, &usage);
     }
 
     Err(SubagentRunError::MaxIterationsExceeded(max_iterations))
@@ -791,123 +1139,10 @@ fn parse_tool_arguments(arguments: &str) -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::Value::Object(Default::default()))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool filtering
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Returns indices into `parent_tools` for the tools the sub-agent may
-/// invoke. Index-based filtering avoids cloning `Box<dyn Tool>` (which
-/// isn't Clone) and lets us reuse the parent's existing instances.
-///
-/// Filters are applied in this order (shorter-circuit first):
-/// 1. `disallowed` — explicit deny list.
-/// 2. `category_filter` — restrict to `System` or `Skill` category.
-/// 3. `skill_filter` — restrict to tools named `{skill}__*`.
-/// 4. `scope` — `Wildcard` (everything remaining) or `Named` allowlist.
-fn filter_tool_indices(
-    parent_tools: &[Box<dyn Tool>],
-    scope: &ToolScope,
-    disallowed: &[String],
-    skill_filter: Option<&str>,
-    category_filter: Option<ToolCategory>,
-) -> Vec<usize> {
-    let disallow_set: HashSet<&str> = disallowed.iter().map(|s| s.as_str()).collect();
-    let skill_prefix = skill_filter.map(|s| format!("{s}__"));
-
-    parent_tools
-        .iter()
-        .enumerate()
-        .filter(|(_, tool)| {
-            let name = tool.name();
-            if disallow_set.contains(name) {
-                return false;
-            }
-            if let Some(required) = category_filter {
-                if tool.category() != required {
-                    return false;
-                }
-            }
-            if let Some(prefix) = skill_prefix.as_deref() {
-                if !name.starts_with(prefix) {
-                    return false;
-                }
-            }
-            match scope {
-                ToolScope::Wildcard => true,
-                ToolScope::Named(allowed) => allowed.iter().any(|n| n == name),
-            }
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Prompt loading + composition
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Resolve a [`PromptSource`] to its raw markdown body. Inline sources
-/// return immediately; file sources are read from disk relative to the
-/// workspace `prompts/` directory or the agent crate's bundled prompts.
-fn load_prompt_source(
-    source: &PromptSource,
-    workspace_dir: &std::path::Path,
-) -> Result<String, SubagentRunError> {
-    match source {
-        PromptSource::Inline(body) => Ok(body.clone()),
-        PromptSource::File { path } => {
-            // Try the workspace's `agent/prompts/` first (so users can
-            // override built-in prompts), then fall back to the crate's
-            // own bundled prompts via `include_str!`-style lookup.
-            let workspace_path = workspace_dir.join("agent").join("prompts").join(path);
-            if workspace_path.is_file() {
-                return std::fs::read_to_string(&workspace_path).map_err(|e| {
-                    SubagentRunError::PromptLoad {
-                        path: workspace_path.display().to_string(),
-                        source: e,
-                    }
-                });
-            }
-            // Built-in prompt fallback. The agent prompts directory is
-            // already shipped at `src/openhuman/agent/prompts/` and
-            // included in the binary via the `IdentitySection` workspace
-            // file write — so we re-use that scaffolding by reading from
-            // `<workspace>/<filename>` after the parent agent has
-            // bootstrapped its workspace files. For sub-agent
-            // archetype prompts (e.g. `archetypes/researcher.md`),
-            // we look up by basename in the workspace, then accept
-            // missing files as an empty body (the runner will fall
-            // back to a generic role hint).
-            let workspace_root_path = workspace_dir.join(path);
-            if workspace_root_path.is_file() {
-                return std::fs::read_to_string(&workspace_root_path).map_err(|e| {
-                    SubagentRunError::PromptLoad {
-                        path: workspace_root_path.display().to_string(),
-                        source: e,
-                    }
-                });
-            }
-            tracing::warn!(
-                path = %path,
-                "[subagent_runner] archetype prompt file not found, using empty body"
-            );
-            Ok(String::new())
-        }
-    }
-}
-
-// Note: the narrow sub-agent prompt renderer lives in
-// `crate::openhuman::context::prompt::render_subagent_system_prompt`
-// so every system-prompt-building call-site — main agents, sub-agents,
-// channel runtimes — shares one module.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
-    use super::super::definition::ModelSpec;
     use super::*;
+    use crate::openhuman::agent::harness::definition::{ModelSpec, ToolScope};
 
     fn make_def_named_tools(names: &[&str]) -> AgentDefinition {
         AgentDefinition {
@@ -926,15 +1161,15 @@ mod tests {
             tools: ToolScope::Named(names.iter().map(|s| s.to_string()).collect()),
             disallowed_tools: vec![],
             skill_filter: None,
-            category_filter: None,
+            extra_tools: vec![],
             max_iterations: 5,
             timeout_secs: None,
-            sandbox_mode: super::super::definition::SandboxMode::None,
+            sandbox_mode: crate::openhuman::agent::harness::definition::SandboxMode::None,
             background: false,
             uses_fork_context: false,
             subagents: vec![],
             delegate_name: None,
-            source: super::super::definition::DefinitionSource::Builtin,
+            source: crate::openhuman::agent::harness::definition::DefinitionSource::Builtin,
         }
     }
 
@@ -973,7 +1208,7 @@ mod tests {
     fn filter_named_scope_keeps_only_named() {
         let parent: Vec<Box<dyn Tool>> = vec![stub("alpha"), stub("beta"), stub("gamma")];
         let def = make_def_named_tools(&["alpha", "gamma"]);
-        let idx = filter_tool_indices(&parent, &def.tools, &def.disallowed_tools, None, None);
+        let idx = filter_tool_indices(&parent, &def.tools, &def.disallowed_tools, None);
         let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
         assert_eq!(names, vec!["alpha", "gamma"]);
     }
@@ -984,7 +1219,7 @@ mod tests {
         let mut def = make_def_named_tools(&[]);
         def.tools = ToolScope::Wildcard;
         def.disallowed_tools = vec!["beta".into()];
-        let idx = filter_tool_indices(&parent, &def.tools, &def.disallowed_tools, None, None);
+        let idx = filter_tool_indices(&parent, &def.tools, &def.disallowed_tools, None);
         let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
         assert_eq!(names, vec!["alpha", "gamma"]);
     }
@@ -999,13 +1234,7 @@ mod tests {
         ];
         let mut def = make_def_named_tools(&[]);
         def.tools = ToolScope::Wildcard;
-        let idx = filter_tool_indices(
-            &parent,
-            &def.tools,
-            &def.disallowed_tools,
-            Some("notion"),
-            None,
-        );
+        let idx = filter_tool_indices(&parent, &def.tools, &def.disallowed_tools, Some("notion"));
         let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
         assert_eq!(names, vec!["notion__search", "notion__read"]);
     }
@@ -1020,201 +1249,9 @@ mod tests {
             stub("gmail__send"),
         ];
         let def = make_def_named_tools(&["notion__search", "gmail__send"]);
-        let idx = filter_tool_indices(
-            &parent,
-            &def.tools,
-            &def.disallowed_tools,
-            Some("notion"),
-            None,
-        );
+        let idx = filter_tool_indices(&parent, &def.tools, &def.disallowed_tools, Some("notion"));
         let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
         assert_eq!(names, vec!["notion__search"]);
-    }
-
-    /// A stub tool that claims to be a skill-category tool, so we can
-    /// exercise `filter_tool_indices` / `category_filter` without
-    /// needing the real skill-bridge runtime.
-    struct SkillStubTool {
-        name: &'static str,
-    }
-
-    #[async_trait]
-    impl Tool for SkillStubTool {
-        fn name(&self) -> &str {
-            self.name
-        }
-        fn description(&self) -> &str {
-            "skill stub"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
-            Ok(ToolResult::success("ok"))
-        }
-        fn permission_level(&self) -> PermissionLevel {
-            PermissionLevel::Write
-        }
-        fn category(&self) -> ToolCategory {
-            ToolCategory::Skill
-        }
-    }
-
-    fn skill_stub(name: &'static str) -> Box<dyn Tool> {
-        Box::new(SkillStubTool { name })
-    }
-
-    #[test]
-    fn filter_category_skill_keeps_only_skill_tools() {
-        let parent: Vec<Box<dyn Tool>> = vec![
-            stub("file_read"),
-            stub("shell"),
-            skill_stub("notion__search"),
-            skill_stub("gmail__send"),
-        ];
-        let def = make_def_named_tools(&[]); // Named([])
-                                             // Wildcard + Skill category → only skill-category tools.
-        let mut def = def;
-        def.tools = ToolScope::Wildcard;
-        let idx = filter_tool_indices(
-            &parent,
-            &def.tools,
-            &def.disallowed_tools,
-            None,
-            Some(ToolCategory::Skill),
-        );
-        let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
-        assert_eq!(names, vec!["notion__search", "gmail__send"]);
-    }
-
-    #[test]
-    fn filter_category_system_excludes_skill_tools() {
-        let parent: Vec<Box<dyn Tool>> = vec![
-            stub("file_read"),
-            skill_stub("notion__search"),
-            stub("shell"),
-        ];
-        let mut def = make_def_named_tools(&[]);
-        def.tools = ToolScope::Wildcard;
-        let idx = filter_tool_indices(
-            &parent,
-            &def.tools,
-            &def.disallowed_tools,
-            None,
-            Some(ToolCategory::System),
-        );
-        let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
-        assert_eq!(names, vec!["file_read", "shell"]);
-    }
-
-    #[test]
-    fn filter_category_and_skill_filter_compose() {
-        // Category=Skill AND skill_filter=notion → only notion__* tools
-        // that are also Skill-category.
-        let parent: Vec<Box<dyn Tool>> = vec![
-            skill_stub("notion__search"),
-            skill_stub("notion__read"),
-            skill_stub("gmail__send"),
-            stub("file_read"),
-            // A pathological system-category tool with a "notion__"
-            // name prefix — the category filter should still exclude it.
-            stub("notion__fake"),
-        ];
-        let mut def = make_def_named_tools(&[]);
-        def.tools = ToolScope::Wildcard;
-        let idx = filter_tool_indices(
-            &parent,
-            &def.tools,
-            &def.disallowed_tools,
-            Some("notion"),
-            Some(ToolCategory::Skill),
-        );
-        let names: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
-        assert_eq!(names, vec!["notion__search", "notion__read"]);
-    }
-
-    /// End-to-end verification that a sub-agent with
-    /// `category_filter = "skill"` (like the built-in `skills_agent`) sees
-    /// the real Composio tools alongside any other `Skill`-category tools
-    /// and does **not** see `System`-category tools.
-    ///
-    /// This is the regression test for "skills subagent has access to
-    /// composio tools": if any of the composio tool impls forgets to
-    /// override `category()` and falls back to the default `System`, it
-    /// gets filtered out here and this test fails.
-    #[test]
-    fn skills_subagent_filter_admits_composio_tools() {
-        use crate::openhuman::composio::client::ComposioClient;
-        use crate::openhuman::composio::tools::{
-            ComposioAuthorizeTool, ComposioExecuteTool, ComposioListConnectionsTool,
-            ComposioListToolkitsTool, ComposioListToolsTool,
-        };
-        use crate::openhuman::integrations::IntegrationClient;
-        use std::sync::Arc;
-
-        // Build a throwaway composio client. The filter only touches
-        // `Tool::name()` and `Tool::category()`, so no HTTP calls happen.
-        let inner =
-            IntegrationClient::new("http://127.0.0.1:0".to_string(), "test-token".to_string());
-        let client = ComposioClient::new(Arc::new(inner));
-
-        // Parent registry = the five real Composio tools + a couple of
-        // plain system-category stubs. We expect exactly the composio
-        // tools to survive the skills sub-agent's category filter.
-        let parent: Vec<Box<dyn Tool>> = vec![
-            Box::new(ComposioListToolkitsTool::new(client.clone())),
-            Box::new(ComposioListConnectionsTool::new(client.clone())),
-            Box::new(ComposioAuthorizeTool::new(client.clone())),
-            Box::new(ComposioListToolsTool::new(client.clone())),
-            Box::new(ComposioExecuteTool::new(client)),
-            stub("file_read"),
-            stub("shell"),
-        ];
-
-        // Mirror the skills_agent definition: wildcard tool scope,
-        // category_filter = Skill, no skill_filter.
-        let mut def = make_def_named_tools(&[]);
-        def.tools = ToolScope::Wildcard;
-        let idx = filter_tool_indices(
-            &parent,
-            &def.tools,
-            &def.disallowed_tools,
-            None,
-            Some(ToolCategory::Skill),
-        );
-
-        let surviving: Vec<&str> = idx.iter().map(|&i| parent[i].name()).collect();
-
-        // All five composio tools must be present.
-        for expected in &[
-            "composio_list_toolkits",
-            "composio_list_connections",
-            "composio_authorize",
-            "composio_list_tools",
-            "composio_execute",
-        ] {
-            assert!(
-                surviving.contains(expected),
-                "skills sub-agent filter dropped composio tool `{}` — \
-                 did someone remove the `category()` override? \
-                 surviving = {:?}",
-                expected,
-                surviving,
-            );
-        }
-
-        // System-category tools must be filtered out.
-        assert!(!surviving.contains(&"file_read"));
-        assert!(!surviving.contains(&"shell"));
-
-        // And we should see exactly 5 survivors, no more, no less.
-        assert_eq!(
-            surviving.len(),
-            5,
-            "expected exactly 5 composio tools to pass the skills filter, \
-             got {:?}",
-            surviving,
-        );
     }
 
     #[test]
@@ -1225,7 +1262,7 @@ mod tests {
 
     // ── End-to-end runner tests with mock provider ────────────────────────
 
-    use super::super::fork_context::{with_fork_context, with_parent_context};
+    use crate::openhuman::agent::harness::fork_context::{with_fork_context, with_parent_context};
     use crate::openhuman::providers::{
         ChatRequest as PChatRequest, ChatResponse, Provider, ToolCall,
     };
@@ -1237,7 +1274,6 @@ mod tests {
     #[derive(Clone)]
     struct CapturedRequest {
         messages: Vec<crate::openhuman::providers::ChatMessage>,
-        cache_boundary: Option<usize>,
         tool_count: usize,
     }
 
@@ -1275,7 +1311,6 @@ mod tests {
         ) -> anyhow::Result<ChatResponse> {
             self.captured.lock().push(CapturedRequest {
                 messages: request.messages.to_vec(),
-                cache_boundary: request.system_prompt_cache_boundary,
                 tool_count: request.tools.map_or(0, |tools| tools.len()),
             });
             let mut q = self.responses.lock();
@@ -1338,6 +1373,8 @@ mod tests {
             connected_integrations: vec![],
             composio_client: None,
             tool_call_format: crate::openhuman::context::prompt::ToolCallFormat::PFormat,
+            session_key: "0_test".into(),
+            session_parent_prefix: None,
         }
     }
 
@@ -1403,7 +1440,6 @@ mod tests {
                 "summarise X",
                 SubagentRunOptions {
                     skill_filter_override: None,
-                    category_filter_override: None,
                     toolkit_override: None,
                     context: None,
                     task_id: Some("t1".into()),
@@ -1485,31 +1521,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_mode_threads_system_prompt_cache_boundary() {
-        let provider = ScriptedProvider::new(vec![text_response("ok")]);
-        let parent = make_parent(provider.clone(), vec![stub("file_read")]);
-        let def = make_def_named_tools(&[]);
-
-        let _ = with_parent_context(parent, async {
-            run_subagent(
-                &def,
-                "the actual task prompt",
-                SubagentRunOptions::default(),
-            )
-            .await
-        })
-        .await
-        .unwrap();
-
-        let captured = provider.captured.lock();
-        assert_eq!(captured.len(), 1);
-        assert!(
-            captured[0].cache_boundary.is_some(),
-            "typed sub-agent request should carry a prompt cache boundary"
-        );
-    }
-
-    #[tokio::test]
     async fn typed_mode_filters_tools_by_skill_filter() {
         // Parent has tools spanning notion__*, gmail__*, and a generic
         // file_read; spawn the runner with skill_filter override "notion"
@@ -1534,7 +1545,6 @@ mod tests {
                 "lookup",
                 SubagentRunOptions {
                     skill_filter_override: Some("notion".into()),
-                    category_filter_override: None,
                     toolkit_override: None,
                     context: None,
                     task_id: None,
@@ -1651,11 +1661,10 @@ mod tests {
             system_prompt: Arc::new("PARENT_SYSTEM_PROMPT_BYTES".into()),
             tool_specs: Arc::new(vec![parent.all_tool_specs[0].clone()]),
             message_prefix: Arc::new(prefix.clone()),
-            cache_boundary: Some(9),
             fork_task_prompt: "ANALYSE THIS BRANCH".into(),
         };
 
-        let def = super::super::builtin_definitions::fork_definition();
+        let def = crate::openhuman::agent::harness::builtin_definitions::fork_definition();
 
         let outcome = with_parent_context(parent, async move {
             with_fork_context(fork, async {
@@ -1687,7 +1696,6 @@ mod tests {
         let appended = first_call.messages.last().unwrap();
         assert_eq!(appended.role, "user");
         assert_eq!(appended.content, "ANALYSE THIS BRANCH");
-        assert_eq!(first_call.cache_boundary, Some(9));
         assert_eq!(first_call.tool_count, 1);
     }
 
@@ -1695,7 +1703,7 @@ mod tests {
     async fn fork_mode_errors_when_no_fork_context() {
         let provider = ScriptedProvider::new(vec![text_response("unused")]);
         let parent = make_parent(provider, vec![stub("file_read")]);
-        let def = super::super::builtin_definitions::fork_definition();
+        let def = crate::openhuman::agent::harness::builtin_definitions::fork_definition();
 
         let result = with_parent_context(parent, async {
             run_subagent(&def, "x", SubagentRunOptions::default()).await
