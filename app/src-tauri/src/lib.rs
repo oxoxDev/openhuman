@@ -11,6 +11,8 @@ mod discord_scanner;
 mod imessage_scanner;
 mod notification_settings;
 #[cfg(feature = "cef")]
+mod screen_capture;
+#[cfg(feature = "cef")]
 mod slack_scanner;
 #[cfg(feature = "cef")]
 mod telegram_scanner;
@@ -921,6 +923,10 @@ pub fn run() {
             webview_accounts::webview_set_focused_account,
             notification_settings::notification_settings_get,
             notification_settings::notification_settings_set,
+            #[cfg(feature = "cef")]
+            screen_capture::screen_share_list_sources,
+            #[cfg(feature = "cef")]
+            screen_capture::screen_share_thumbnail,
             activate_main_window,
             show_native_notification
         ])
