@@ -34,7 +34,8 @@ export type SettingsRoute =
   | 'notification-routing'
   | 'intelligence'
   | 'webhooks-triggers'
-  | 'composio-triggers';
+  | 'composio-triggers'
+  | 'call-transcription';
 
 export interface BreadcrumbItem {
   label: string;
@@ -109,6 +110,7 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
     // shorter `notifications` prefix.
     if (path.includes('/settings/notification-routing')) return 'notification-routing';
     if (path.includes('/settings/notifications')) return 'notifications';
+    if (path.includes('/settings/call-transcription')) return 'call-transcription';
     return 'home';
   };
 
@@ -192,6 +194,7 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
       case 'voice':
       case 'messaging':
       case 'tools':
+      case 'call-transcription':
         return [settingsCrumb, featuresCrumb];
 
       // Leaf panels under AI & Models

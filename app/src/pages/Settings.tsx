@@ -7,6 +7,7 @@ import AIPanel from '../components/settings/panels/AIPanel';
 import AutocompleteDebugPanel from '../components/settings/panels/AutocompleteDebugPanel';
 import AutocompletePanel from '../components/settings/panels/AutocompletePanel';
 import BillingPanel from '../components/settings/panels/BillingPanel';
+import CallTranscriptionPanel from '../components/settings/panels/CallTranscriptionPanel';
 import ComposioTriagePanel from '../components/settings/panels/ComposioTriagePanel';
 import ConnectionsPanel from '../components/settings/panels/ConnectionsPanel';
 import CronJobsPanel from '../components/settings/panels/CronJobsPanel';
@@ -121,6 +122,23 @@ const featuresSettingsItems = [
     ),
   },
   // Autocomplete + Voice Dictation hidden per #717 (routes retained for re-enable).
+  {
+    id: 'call-transcription',
+    title: 'Call Transcription',
+    description:
+      'Automatically transcribe Slack Huddles, Discord voice channels, and WhatsApp calls',
+    route: 'call-transcription',
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={2}
+          d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+        />
+      </svg>
+    ),
+  },
   {
     id: 'messaging',
     title: 'Messaging Channels',
@@ -274,6 +292,7 @@ const Settings = () => {
         <Route path="screen-intelligence" element={wrapSettingsPage(<ScreenIntelligencePanel />)} />
         <Route path="autocomplete" element={wrapSettingsPage(<AutocompletePanel />)} />
         <Route path="voice" element={wrapSettingsPage(<VoicePanel />)} />
+        <Route path="call-transcription" element={wrapSettingsPage(<CallTranscriptionPanel />)} />
         <Route path="messaging" element={wrapSettingsPage(<MessagingPanel />)} />
         <Route path="notifications" element={wrapSettingsPage(<NotificationsPanel />)} />
         <Route path="tools" element={wrapSettingsPage(<ToolsPanel />)} />

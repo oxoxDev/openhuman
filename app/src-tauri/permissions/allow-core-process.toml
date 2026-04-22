@@ -80,5 +80,13 @@ allow = [
     # entries the invoke is rejected with "Command not found".
     "meet_call_open_window",
     "meet_call_close_window",
+    # Call transcription surface (see app/src-tauri/src/webview_accounts/
+    # call_session.rs). Manages per-account STT capture lifecycle for
+    # embedded voice/huddle calls (Slack/Discord/WhatsApp). Without these
+    # allow entries the React-side toggle invokes are rejected with
+    # "Command not found".
+    "call_transcription_start",
+    "call_transcription_stop",
+    "call_transcription_status",
 ]
 deny = []
