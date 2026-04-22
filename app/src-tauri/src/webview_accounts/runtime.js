@@ -274,13 +274,19 @@
     // under `__ohsp_*` class/ID prefixes and attached to a closed shadow
     // root where possible to avoid colliding with the host page's CSS.
     function showInPagePicker(sources) {
-      return new Promise(function (resolveOuter) {
+      return new Promise(function (resolveOuter, rejectOuter) {
         function host() { return (document.body || document.documentElement); }
         if (!host()) {
-          // Host not ready — retry once the DOM is parsed.
-          document.addEventListener('DOMContentLoaded', function () {
-            resolveOuter(null);
-          }, { once: true });
+          // DOM hasn't parsed yet — wait for it and retry. Previously we
+          // resolved null here, which the shim turned into an AbortError
+          // even though no picker was ever shown (coderabbit #809).
+          document.addEventListener(
+            'DOMContentLoaded',
+            function () {
+              showInPagePicker(sources).then(resolveOuter, rejectOuter);
+            },
+            { once: true }
+          );
           return;
         }
 
@@ -460,29 +466,46 @@
             } else {
               // Placeholder glyph until the lazy-loaded thumbnail arrives.
               thumb.textContent = activeTab === 'screen' ? '□' : '▣';
-              rawInvoke('screen_share_thumbnail', { args: { id: src.id } })
-                .then(function (b64) {
-                  if (!b64 || typeof b64 !== 'string') return;
-                  // Stash on the source so future re-renders keep the
-                  // thumbnail without re-requesting it.
-                  src.thumbnailPngBase64 = b64;
-                  // The grid may have re-rendered by the time the IPC
-                  // resolves (tab switch, etc). Look up the live node.
-                  const liveBtn = gridEl.querySelector(
-                    '[data-source-id="' + src.id.replace(/"/g, '\\"') + '"]'
-                  );
-                  if (!liveBtn) return;
-                  const liveThumb = liveBtn.querySelector('.srcthumb');
-                  if (!liveThumb) return;
-                  while (liveThumb.firstChild) liveThumb.removeChild(liveThumb.firstChild);
-                  const img = document.createElement('img');
-                  img.src = 'data:image/png;base64,' + b64;
-                  img.alt = '';
-                  img.style.cssText =
-                    'width: 100%; height: 100%; object-fit: contain; display: block;';
-                  liveThumb.appendChild(img);
-                })
-                .catch(function () { /* thumbnail failures degrade gracefully to the glyph */ });
+              // Dedup in-flight thumbnail IPCs: render() re-runs on every
+              // selection change and tab switch, and without this cache
+              // each pass would re-issue screen_share_thumbnail for every
+              // source that hadn't yet returned (coderabbit #809).
+              function paintThumb(b64) {
+                if (!b64 || typeof b64 !== 'string') return;
+                const liveBtn = gridEl.querySelector(
+                  '[data-source-id="' + src.id.replace(/"/g, '\\"') + '"]'
+                );
+                if (!liveBtn) return;
+                const liveThumb = liveBtn.querySelector('.srcthumb');
+                if (!liveThumb) return;
+                while (liveThumb.firstChild) liveThumb.removeChild(liveThumb.firstChild);
+                const img = document.createElement('img');
+                img.src = 'data:image/png;base64,' + b64;
+                img.alt = '';
+                img.style.cssText =
+                  'width: 100%; height: 100%; object-fit: contain; display: block;';
+                liveThumb.appendChild(img);
+              }
+              if (src.__thumbnailPromise) {
+                src.__thumbnailPromise.then(paintThumb, function () {});
+              } else {
+                src.__thumbnailPromise = rawInvoke('screen_share_thumbnail', {
+                  args: { id: src.id },
+                }).then(
+                  function (b64) {
+                    if (b64 && typeof b64 === 'string') {
+                      // Stash on the source so future re-renders keep
+                      // the thumbnail without re-requesting it.
+                      src.thumbnailPngBase64 = b64;
+                    }
+                    paintThumb(b64);
+                    return b64;
+                  },
+                  function () {
+                    /* thumbnail failures degrade gracefully to the glyph */
+                  }
+                );
+              }
             }
             const name = document.createElement('div');
             name.className = 'srcname';
@@ -652,28 +675,4 @@
         ' on ' + ((typeof location !== 'undefined' && location.origin) || '?'),
     });
   })();
-
-  // --- #713 Stage 0 PoC helper (kept for manual smoke-tests) ---
-  // Usage: `await window.__ohScreenShareTest('screen:<CGDirectDisplayID>:0')`.
-  window.__ohScreenShareTest = async function (sourceId) {
-    sourceId = sourceId || 'screen:1:0';
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: sourceId,
-            maxFrameRate: 30,
-          },
-        },
-        audio: false,
-      });
-      const track = stream.getVideoTracks()[0];
-      const label = track && track.label;
-      stream.getTracks().forEach(function (t) { t.stop(); });
-      return { ok: true, trackLabel: label };
-    } catch (e) {
-      return { ok: false, error: (e && (e.name + ': ' + e.message)) || String(e) };
-    }
-  };
 })();
