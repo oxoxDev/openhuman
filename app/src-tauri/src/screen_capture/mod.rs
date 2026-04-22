@@ -76,6 +76,30 @@ pub struct ThumbnailArgs {
     pub id: String,
 }
 
+/// What kind of source a parsed DesktopMediaID-format string describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceKind {
+    Screen,
+    Window,
+}
+
+/// Parse a `screen:<u32>:0` / `window:<u32>:0` source ID into
+/// `(kind, numeric id)`. Returns `None` if the prefix is unknown, the
+/// numeric segment doesn't fit in a `u32`, or the shape otherwise doesn't
+/// match what the shim constructed from `screen_share_list_sources`. Pure
+/// logic so it can be unit-tested without touching platform APIs; macOS
+/// callers use it before dispatching to the capture backend.
+pub(crate) fn parse_source_id(id: &str) -> Option<(SourceKind, u32)> {
+    let mut parts = id.splitn(3, ':');
+    let kind = match parts.next()? {
+        "screen" => SourceKind::Screen,
+        "window" => SourceKind::Window,
+        _ => return None,
+    };
+    let num = parts.next()?.parse::<u32>().ok()?;
+    Some((kind, num))
+}
+
 /// Capture a single source's thumbnail as base64 PNG. Called per-source in
 /// parallel from the picker shim so the picker UI opens immediately and
 /// thumbnails fade in as they arrive, rather than blocking the whole
@@ -258,13 +282,10 @@ mod macos {
     /// thumbnail as base64 PNG. Returns `None` if the ID is malformed or
     /// the underlying capture API returns a null/zero-size image.
     pub(super) fn thumbnail_for_id(id: &str) -> Option<String> {
-        let mut parts = id.splitn(3, ':');
-        let kind = parts.next()?;
-        let num = parts.next()?.parse::<u32>().ok()?;
+        let (kind, num) = super::parse_source_id(id)?;
         let b64 = match kind {
-            "screen" => screen_thumbnail_b64(num),
-            "window" => window_thumbnail_b64(num),
-            _ => return None,
+            super::SourceKind::Screen => screen_thumbnail_b64(num),
+            super::SourceKind::Window => window_thumbnail_b64(num),
         };
         if b64.is_empty() {
             None
@@ -464,5 +485,70 @@ mod macos {
             CFRelease(array);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_source_id, SourceKind};
+
+    #[test]
+    fn parses_screen_id() {
+        assert_eq!(parse_source_id("screen:1:0"), Some((SourceKind::Screen, 1)));
+        assert_eq!(
+            parse_source_id("screen:69734208:0"),
+            Some((SourceKind::Screen, 69734208))
+        );
+    }
+
+    #[test]
+    fn parses_window_id() {
+        assert_eq!(parse_source_id("window:42:0"), Some((SourceKind::Window, 42)));
+    }
+
+    #[test]
+    fn trailing_segment_ignored() {
+        // Chromium always emits `:0` as the third segment; shim is tolerant
+        // of whatever trails as long as prefix + numeric are intact.
+        assert_eq!(
+            parse_source_id("screen:1:extra:stuff"),
+            Some((SourceKind::Screen, 1))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_prefix() {
+        assert_eq!(parse_source_id("tab:1:0"), None);
+        assert_eq!(parse_source_id("browser:1:0"), None);
+        assert_eq!(parse_source_id(""), None);
+    }
+
+    #[test]
+    fn rejects_missing_numeric() {
+        assert_eq!(parse_source_id("screen::0"), None);
+        assert_eq!(parse_source_id("screen:"), None);
+        assert_eq!(parse_source_id("screen"), None);
+    }
+
+    #[test]
+    fn rejects_non_numeric_id() {
+        assert_eq!(parse_source_id("screen:abc:0"), None);
+        assert_eq!(parse_source_id("window:0x1:0"), None);
+    }
+
+    #[test]
+    fn rejects_overflowing_id() {
+        // u32::MAX + 1.
+        assert_eq!(parse_source_id("screen:4294967296:0"), None);
+        // Negative numbers are never valid CGDirectDisplayID / CGWindowID.
+        assert_eq!(parse_source_id("screen:-1:0"), None);
+    }
+
+    #[test]
+    fn list_source_roundtrip() {
+        // The enumerator produces the exact shape `parse_source_id` expects,
+        // so a round trip must succeed for every kind it can emit.
+        assert!(parse_source_id("screen:1:0").is_some());
+        assert!(parse_source_id("window:12345:0").is_some());
     }
 }
