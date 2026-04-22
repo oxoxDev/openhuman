@@ -1593,7 +1593,11 @@ pub async fn validate_resolved_host(raw_url: &str) -> Result<(), String> {
     let port = parsed.port_or_known_default().unwrap_or(443);
     // IPv6 literal hosts come back bracketed from `url::Url`; `lookup_host`
     // needs the bracketed form for IPv6 to parse correctly.
-    let lookup_target = if parsed.host().map(|h| matches!(h, url::Host::Ipv6(_))).unwrap_or(false) {
+    let lookup_target = if parsed
+        .host()
+        .map(|h| matches!(h, url::Host::Ipv6(_)))
+        .unwrap_or(false)
+    {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
