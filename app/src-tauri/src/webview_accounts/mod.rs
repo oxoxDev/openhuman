@@ -695,7 +695,9 @@ pub struct WebviewAccountsState {
     prewarm_accounts: Mutex<HashSet<String>>,
     /// Active call recording sessions. Keyed by account_id. Populated when
     /// a call-started event is detected and cleared on call-ended or purge.
-    pub call_sessions: call_session::CallSessionManager,
+    /// Wrapped in `Arc` so it can be cloned into detached transcription tasks
+    /// without blocking the caller (see `call_transcription_stop`).
+    pub call_sessions: std::sync::Arc<call_session::CallSessionManager>,
 }
 
 /// Threshold and window for the gmeet workspace-marketing rewrite loop
@@ -3245,8 +3247,14 @@ pub async fn call_transcription_start<R: Runtime>(
     Ok(())
 }
 
-/// Stop a call transcription session, transcribe accumulated audio, and emit
-/// a `webview:event` with `kind: "call_transcript"`.
+/// Stop a call transcription session and kick off background transcription.
+///
+/// Returns immediately — the actual audio assembly and Whisper RPC call (which
+/// can take up to 120 s) run in a detached Tokio task. The `call_transcript`
+/// `webview:event` is emitted by that task when Whisper finishes.
+///
+/// This avoids blocking `closeWebviewAccount` / `purgeWebviewAccount` on the
+/// full Whisper timeout when the user closes a tab while a call is in progress.
 #[tauri::command]
 pub async fn call_transcription_stop<R: Runtime>(
     app: AppHandle<R>,
@@ -3256,11 +3264,26 @@ pub async fn call_transcription_stop<R: Runtime>(
 ) -> Result<(), String> {
     let reason = reason.unwrap_or_else(|| "ended".to_string());
     log::info!(
-        "[call-transcription] stop account={} reason={}",
+        "[call-transcription] stop account={} reason={} (spawning detached task)",
         account_id,
         reason
     );
-    state.call_sessions.end(&app, &account_id, &reason).await;
+    // Clone the Arc so the spawned task owns its own reference without
+    // holding the Tauri `State` borrow past the command boundary.
+    let sessions = std::sync::Arc::clone(&state.call_sessions);
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        log::debug!(
+            "[call-transcription] detached transcription task started account={} reason={}",
+            account_id,
+            reason
+        );
+        sessions.end(&app_clone, &account_id, &reason).await;
+        log::debug!(
+            "[call-transcription] detached transcription task finished account={}",
+            account_id
+        );
+    });
     Ok(())
 }
 
