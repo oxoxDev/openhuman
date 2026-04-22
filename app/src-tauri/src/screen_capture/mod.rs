@@ -503,7 +503,10 @@ mod tests {
 
     #[test]
     fn parses_window_id() {
-        assert_eq!(parse_source_id("window:42:0"), Some((SourceKind::Window, 42)));
+        assert_eq!(
+            parse_source_id("window:42:0"),
+            Some((SourceKind::Window, 42))
+        );
     }
 
     #[test]
