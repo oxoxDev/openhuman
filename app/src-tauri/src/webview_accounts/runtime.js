@@ -159,7 +159,32 @@
       }).catch(function () {});
     }
 
+    // In-flight guard (graycyrus refactor #6). The host-side state already
+    // evicts a stale session when begin_session fires twice, but without a
+    // shim-side guard a second call would still append a second picker DOM
+    // while the first is open — the user would see two stacked overlays.
+    // Reject a concurrent call the same way the MediaStreams spec does
+    // when an existing capture request is in progress.
+    let pickerInFlight = false;
+
     const shim = async function (constraints) {
+      constraints = constraints || {};
+      if (pickerInFlight) {
+        send('log', { level: 'warn', msg: '[gdm-shim] picker already open, rejecting concurrent call' });
+        throw new DOMException(
+          'A screen-share picker is already open',
+          'InvalidStateError'
+        );
+      }
+      pickerInFlight = true;
+      try {
+        return await runShim(constraints);
+      } finally {
+        pickerInFlight = false;
+      }
+    };
+
+    const runShim = async function (constraints) {
       constraints = constraints || {};
       // User-activation gate (#812). `navigator.userActivation.isActive`
       // is transient — true only during the direct call stack of a real
