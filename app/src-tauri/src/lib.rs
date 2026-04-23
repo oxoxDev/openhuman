@@ -616,6 +616,8 @@ pub fn run() {
     let builder = builder.manage(discord_scanner::ScannerRegistry::new());
     #[cfg(feature = "cef")]
     let builder = builder.manage(telegram_scanner::ScannerRegistry::new());
+    #[cfg(feature = "cef")]
+    let builder = builder.manage(screen_capture::ScreenShareState::new());
     builder
         .setup(move |app| {
             #[cfg(any(windows, target_os = "linux"))]
@@ -924,9 +926,11 @@ pub fn run() {
             notification_settings::notification_settings_get,
             notification_settings::notification_settings_set,
             #[cfg(feature = "cef")]
-            screen_capture::screen_share_list_sources,
+            screen_capture::screen_share_begin_session,
             #[cfg(feature = "cef")]
             screen_capture::screen_share_thumbnail,
+            #[cfg(feature = "cef")]
+            screen_capture::screen_share_finalize_session,
             activate_main_window,
             show_native_notification
         ])
