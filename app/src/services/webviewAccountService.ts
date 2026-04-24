@@ -10,6 +10,7 @@ import {
   setActiveAccount,
 } from '../store/accountsSlice';
 import { addNotification } from '../store/notificationsSlice';
+import { fetchRespondQueue } from '../store/providerSurfaceSlice';
 import type { AccountProvider, IngestedMessage } from '../types/accounts';
 import { threadApi } from './api/threadApi';
 import { chatSend } from './chatService';
@@ -182,13 +183,23 @@ function handleWebviewAccountLoad(payload: WebviewAccountLoadPayload) {
   // a resize landed during the load window) this reapplies the latest
   // measured rect. When the cache is empty (host already unmounted) we
   // simply skip.
+  //
+  // Dispatch `'open'` after the reveal settles (success or failure) so the
+  // spinner is only dismissed once the webview is actually positioned. On
+  // error we still flip to `'open'` so the spinner never hangs indefinitely —
+  // the webview will have been positioned server-side by `emit_load_finished`.
   const bounds = lastBoundsByAccount.get(accountId);
   if (bounds) {
-    invoke('webview_account_reveal', { args: { account_id: accountId, bounds } }).catch(err => {
-      errLog('webview_account_reveal failed account=%s: %o', accountId, err);
-    });
+    invoke('webview_account_reveal', { args: { account_id: accountId, bounds } })
+      .catch(err => {
+        errLog('webview_account_reveal failed account=%s: %o', accountId, err);
+      })
+      .finally(() => {
+        store.dispatch(setAccountStatus({ accountId, status: 'open' }));
+      });
+  } else {
+    store.dispatch(setAccountStatus({ accountId, status: 'open' }));
   }
-  store.dispatch(setAccountStatus({ accountId, status: 'open' }));
 }
 
 function handleNotificationClick(payload: NotificationClickPayload) {
@@ -264,6 +275,9 @@ function handleRecipeEvent(evt: RecipeEventPayload) {
     }));
 
     store.dispatch(appendMessages({ accountId, messages, unread: ingest.unread }));
+
+    // Tauri already forwarded this ingest to core; refresh queue immediately for Agent pane.
+    void store.dispatch(fetchRespondQueue({ silent: true }));
 
     // Fire-and-forget memory write via the existing core RPC.
     // Namespace mirrors the skill-sync convention so the recall pipeline

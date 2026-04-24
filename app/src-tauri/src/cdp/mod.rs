@@ -17,7 +17,7 @@ pub mod target;
 pub use conn::CdpConn;
 pub use emulation::{set_user_agent_override, UaSpec};
 pub use session::{
-    placeholder_data_url, placeholder_marker, spawn_session, target_url_fragment, SpawnedSession,
+    placeholder_marker, placeholder_url, spawn_session, target_url_fragment, SpawnedSession,
 };
 pub use snapshot::Snapshot;
 pub use target::{

@@ -8,6 +8,7 @@ export type AccountProvider =
   | 'slack'
   | 'discord'
   | 'google-meet'
+  | 'zoom'
   | 'browserscan';
 
 // Status lifecycle for an embedded webview account:
@@ -100,6 +101,12 @@ const BASE_PROVIDERS: ProviderDescriptor[] = [
     label: 'Google Meet',
     description: 'Join Google Meet calls and capture live captions.',
     serviceUrl: 'https://meet.google.com/',
+  },
+  {
+    id: 'zoom',
+    label: 'Zoom',
+    description: 'Zoom web client — log in and join meetings from inside the app.',
+    serviceUrl: 'https://zoom.us/',
   },
 ];
 
