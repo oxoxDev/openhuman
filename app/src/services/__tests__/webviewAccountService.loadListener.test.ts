@@ -57,18 +57,23 @@ async function fireLoadEvent(payload: { state: string; url?: string }): Promise<
   const handler = listeners.get('webview-account:load');
   if (!handler) throw new Error('webview-account:load listener not attached');
   handler({ payload: { account_id: ACCOUNT_ID, url: '', ...payload } });
-  // Allow any microtasks (setAccountStatus dispatch, invoke() promise) to drain.
-  await Promise.resolve();
+  // Drain to a macrotask so chained `.catch()` / `.then()` on the
+  // `invoke()` promise inside the handler also settle before we assert.
+  await new Promise(r => setTimeout(r, 0));
 }
 
 describe('webviewAccountService load listener', () => {
   beforeEach(async () => {
-    vi.clearAllMocks();
     listeners.clear();
     stopWebviewAccountService();
-    // Close drops any per-account state (bounds cache + loading flag) left
-    // over from a previous test so each test starts with a clean slate.
+    // Tear down any per-account state left from the previous test (bounds
+    // cache + loading flag) before re-arming the listener for this one.
+    // `stopWebviewAccountService` already clears the module-level Maps;
+    // `closeWebviewAccount` is the no-Tauri-side close path (the invoke is
+    // mocked) and is here only as belt-and-braces.
     await closeWebviewAccount(ACCOUNT_ID);
+    // Single mock reset so individual tests can rely on the `invoke`
+    // resolved-value config they set up after this hook returns.
     vi.clearAllMocks();
     seedAccount();
     startWebviewAccountService();
