@@ -64,47 +64,40 @@ describe('Insights dashboard smoke', () => {
     expect(await textExists('Memory')).toBe(true);
   });
 
-  it('exposes a search input that accepts a query without throwing', async () => {
-    stepLog('typing into the insights search input');
+  it('renders the actionable-items search input (11.2.3) and accepts a query', async () => {
+    // The Memory tab mounts an `<input id="actionable-search">` — assert by id
+    // so the test cannot false-pass on an unrelated input elsewhere on the page.
+    // Real keystroke synthesis via the React onChange path is intentional:
+    // there is no shared helper for typing into arbitrary inputs (only
+    // clickButton / clickText / clickToggle), and `browser.keys()` is unreliable
+    // on tauri-driver, so we follow the established pattern from
+    // `command-palette.spec.ts` (event synthesis via `browser.execute`).
+    stepLog('typing into #actionable-search');
     const typed = await browser.execute(() => {
-      const inputs = Array.from(
-        document.querySelectorAll<HTMLInputElement>('input[type="search"], input[type="text"]')
-      );
-      const target =
-        inputs.find(i => {
-          const placeholder = (i.placeholder || '').toLowerCase();
-          return (
-            placeholder.includes('search') ||
-            placeholder.includes('filter') ||
-            placeholder.includes('memory')
-          );
-        }) ?? inputs[0];
+      const target = document.querySelector<HTMLInputElement>('#actionable-search');
       if (!target) return false;
       target.focus();
-      target.value = 'roundtrip canary';
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value'
+      )?.set;
+      setter?.call(target, 'roundtrip canary');
       target.dispatchEvent(new Event('input', { bubbles: true }));
-      target.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
+      return target.value === 'roundtrip canary';
     });
     expect(typed).toBe(true);
-    await browser.pause(300);
   });
 
-  it('renders at least one source filter affordance', async () => {
-    // Source filters surface as chips/buttons with provider labels (Gmail,
-    // Slack, Telegram, Notion, …). Asserting at least one provider chip is
-    // present is a thin but stable smoke for 11.2.2.
-    const hasFilterChip = await browser.execute(() => {
-      const candidates = Array.from(
-        document.querySelectorAll<HTMLElement>('button, [role="button"]')
-      );
-      return candidates.some(el => {
-        const txt = (el.textContent || '').trim().toLowerCase();
-        return ['gmail', 'slack', 'telegram', 'notion', 'whatsapp', 'discord', 'all sources'].some(
-          p => txt.includes(p)
-        );
-      });
+  it('renders the actionable-source select (11.2.2) with the All Sources option', async () => {
+    // 11.2.2 source filtering is a `<select id="actionable-source">` element
+    // (not provider chips). Asserting on the id + the canonical first option
+    // proves the filter UI mounted without false-positives on stray buttons.
+    const filterPresent = await browser.execute(() => {
+      const select = document.querySelector<HTMLSelectElement>('#actionable-source');
+      if (!select) return false;
+      const allOption = Array.from(select.options).find(o => o.value === 'all');
+      return Boolean(allOption && /all sources/i.test(allOption.textContent || ''));
     });
-    expect(hasFilterChip).toBe(true);
+    expect(filterPresent).toBe(true);
   });
 });
