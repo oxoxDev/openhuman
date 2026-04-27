@@ -93,4 +93,22 @@ describe('useRefetchSnapshotOnTurnEnd', () => {
     });
     expect(mockPatchSnapshot).toHaveBeenLastCalledWith({ currentUser: mockUser2 });
   });
+
+  it('clears the pending debounce timer on unmount so getMe never fires', async () => {
+    vi.mocked(userApi.getMe).mockResolvedValue({ _id: 'user1' } as any);
+
+    const { result, unmount } = renderHook(() => useRefetchSnapshotOnTurnEnd());
+
+    act(() => {
+      result.current.refetch();
+    });
+
+    unmount();
+
+    await act(async () => {
+      vi.advanceTimersByTime(750);
+    });
+
+    expect(userApi.getMe).not.toHaveBeenCalled();
+  });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 import { useCoreState } from '../providers/CoreStateProvider';
 import { userApi } from '../services/api/userApi';
@@ -12,6 +12,15 @@ import { userApi } from '../services/api/userApi';
 export function useRefetchSnapshotOnTurnEnd() {
   const { patchSnapshot } = useCoreState();
   const debounceTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const refetch = useCallback(() => {
     if (debounceTimerRef.current !== null) {
