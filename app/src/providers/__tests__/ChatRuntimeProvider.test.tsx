@@ -31,6 +31,10 @@ vi.mock('../../services/api/threadApi', () => ({
 
 vi.mock('../../hooks/usageRefresh', () => ({ requestUsageRefresh: vi.fn() }));
 
+vi.mock('../../hooks/useRefetchSnapshotOnTurnEnd', () => ({
+  useRefetchSnapshotOnTurnEnd: () => ({ refetch: vi.fn() }),
+}));
+
 function renderProvider(): chatService.ChatEventListeners {
   let captured: chatService.ChatEventListeners = {};
   vi.mocked(chatService.subscribeChatEvents).mockImplementation(listeners => {
