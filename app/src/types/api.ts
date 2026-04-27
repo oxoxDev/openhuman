@@ -63,6 +63,11 @@ export interface User {
   languageCode?: string;
   waitlist?: string;
   activeTeamId: string;
+  onboarding_status?: {
+    stages: Record<string, 'pending' | 'active' | 'done' | 'skipped' | 'error'>;
+    details: Record<string, string>;
+    finished: boolean;
+  };
 }
 
 // Billing types

@@ -13,10 +13,11 @@
  * External calls still go through core (auth, proxy, billing). Only the
  * stage-by-stage orchestration lives in the renderer.
  */
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import Button from '../../../components/ui/Button';
 import WhatLeavesLink from '../../../features/privacy/WhatLeavesLink';
+import { useCoreState } from '../../../providers/CoreStateProvider';
 import { callCoreRpc } from '../../../services/coreRpcClient';
 import OnboardingNextButton from '../components/OnboardingNextButton';
 
@@ -148,22 +149,36 @@ const ContextGatheringStep = ({
   onNext,
   onBack: _onBack,
 }: ContextGatheringStepProps) => {
-  const [stageStatuses, setStageStatuses] = useState<Record<string, StageStatus>>(() => {
+  const { snapshot } = useCoreState();
+  const [localStageStatuses, setLocalStageStatuses] = useState<Record<string, StageStatus>>(() => {
     const initial: Record<string, StageStatus> = {};
     for (const s of STAGES) initial[s.id] = 'pending';
     return initial;
   });
-  const [stageDetails, setStageDetails] = useState<Record<string, string>>({});
-  const [finished, setFinished] = useState(false);
+  const [localStageDetails, setLocalStageDetails] = useState<Record<string, string>>({});
+  const [localFinished, setLocalFinished] = useState(false);
   const [started, setStarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ranRef = useRef(false);
 
   const hasGmail = connectedSources.some(s => s.includes('gmail'));
 
+  const stageStatuses = useMemo(
+    () => snapshot.currentUser?.onboarding_status?.stages ?? localStageStatuses,
+    [snapshot.currentUser?.onboarding_status?.stages, localStageStatuses]
+  );
+  const stageDetails = useMemo(
+    () => snapshot.currentUser?.onboarding_status?.details ?? localStageDetails,
+    [snapshot.currentUser?.onboarding_status?.details, localStageDetails]
+  );
+  const finished = useMemo(
+    () => snapshot.currentUser?.onboarding_status?.finished ?? localFinished,
+    [snapshot.currentUser?.onboarding_status?.finished, localFinished]
+  );
+
   const setStage = (id: Stage['id'], status: StageStatus, detail?: string) => {
-    setStageStatuses(prev => ({ ...prev, [id]: status }));
-    if (detail !== undefined) setStageDetails(prev => ({ ...prev, [id]: detail }));
+    setLocalStageStatuses(prev => ({ ...prev, [id]: status }));
+    if (detail !== undefined) setLocalStageDetails(prev => ({ ...prev, [id]: detail }));
   };
 
   const handleStart = () => {
@@ -174,9 +189,9 @@ const ContextGatheringStep = ({
     if (!hasGmail) {
       const skipped: Record<string, StageStatus> = {};
       for (const s of STAGES) skipped[s.id] = 'skipped';
-      setStageStatuses(skipped);
-      setStageDetails({ 'gmail-search': 'Gmail not connected' });
-      setFinished(true);
+      setLocalStageStatuses(skipped);
+      setLocalStageDetails({ 'gmail-search': 'Gmail not connected' });
+      setLocalFinished(true);
       return;
     }
 
@@ -197,7 +212,7 @@ const ContextGatheringStep = ({
         setStage('gmail-search', 'skipped', 'No LinkedIn URL found in mailbox');
         setStage('linkedin-scrape', 'skipped');
         setStage('build-profile', 'skipped');
-        setFinished(true);
+        setLocalFinished(true);
         return;
       }
     } catch (e) {
@@ -205,7 +220,7 @@ const ContextGatheringStep = ({
       setStage('gmail-search', 'error', e instanceof Error ? e.message : String(e));
       setStage('linkedin-scrape', 'skipped');
       setStage('build-profile', 'skipped');
-      setFinished(true);
+      setLocalFinished(true);
       return;
     }
 
@@ -238,7 +253,7 @@ const ContextGatheringStep = ({
       setStage('build-profile', 'error', e instanceof Error ? e.message : String(e));
     }
 
-    setFinished(true);
+    setLocalFinished(true);
   }
 
   const completedCount = STAGES.filter(s => {

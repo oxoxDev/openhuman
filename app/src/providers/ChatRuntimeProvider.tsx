@@ -1,6 +1,7 @@
 import debug from 'debug';
 import { useCallback, useEffect, useRef } from 'react';
 
+import { useRefetchSnapshotOnTurnEnd } from '../hooks/useRefetchSnapshotOnTurnEnd';
 import { requestUsageRefresh } from '../hooks/usageRefresh';
 import {
   type ChatInferenceStartEvent,
@@ -56,6 +57,7 @@ function rtLog(message: string, fields?: Record<string, string | number | null |
 
 const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
   const dispatch = useAppDispatch();
+  const { refetch: refetchSnapshot } = useRefetchSnapshotOnTurnEnd();
   const socketStatus = useAppSelector(selectSocketStatus);
   const toolTimelineByThread = useAppSelector(state => state.chatRuntime.toolTimelineByThread);
   const inferenceStatusByThread = useAppSelector(
@@ -556,6 +558,7 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
               reason: 'chat_done',
             });
             requestUsageRefresh();
+            refetchSnapshot();
             dispatch(endInferenceTurn({ threadId: event.thread_id }));
             dispatch(setActiveThread(null));
           })();
@@ -574,6 +577,7 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
           reason: 'chat_done',
         });
         requestUsageRefresh();
+        refetchSnapshot();
         dispatch(endInferenceTurn({ threadId: event.thread_id }));
         dispatch(setActiveThread(null));
       },
@@ -636,7 +640,7 @@ const ChatRuntimeProvider = ({ children }: { children: React.ReactNode }) => {
       rtLog('unsubscribe_chat_events');
       cleanup();
     };
-  }, [dispatch, resolveVisibleThreadForProactive, socketStatus]);
+  }, [dispatch, resolveVisibleThreadForProactive, socketStatus, refetchSnapshot]);
 
   return <>{children}</>;
 };
