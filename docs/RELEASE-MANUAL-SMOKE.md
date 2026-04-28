@@ -39,7 +39,7 @@ Applies to every release, all platforms.
 ### Linux
 
 - [ ] **`.deb` and/or `.AppImage` install on a clean Ubuntu 22.04** — `sudo dpkg -i openhuman_*.deb` or `chmod +x openhuman-*.AppImage && ./openhuman-*.AppImage`. Expected: no missing-dependency errors; app launches.
-- [ ] **OS-native notification toasts fire** — Trigger a notification from inside the app (e.g. memory captured, agent finished). Expected: a libnotify-style toast appears outside the app window. (CI Linux only sees Xvfb — this surface only verifies on a real desktop.)
+- [ ] **OS-native notification toasts fire** — Trigger a notification from inside the app (e.g. memory captured, agent finished). Expected: a libnotify-style toast appears outside the app window. (CI Linux sees only Xvfb; this surface verifies on a real desktop.)
 
 ### Cross-platform
 
@@ -62,7 +62,7 @@ Applies to every release, all platforms.
 
 ## Sign-off
 
-```
+```text
 Release: vX.Y.Z
 Tester: @<github-handle>
 Date: YYYY-MM-DD

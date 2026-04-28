@@ -120,14 +120,14 @@ bash app/scripts/e2e-run-spec.sh test/e2e/specs/<your-spec>.spec.ts <id>
 
 ## Not driver-automatable — manual smoke required
 
-Some surfaces cannot be driven by WDIO / Appium because they cross OS-level trust boundaries or hardware paths. These ship with a documented manual smoke checklist ([`docs/RELEASE-MANUAL-SMOKE.md`](./RELEASE-MANUAL-SMOKE.md)) and a sign-off on the release PR:
+Some surfaces cannot be driven by WDIO / Appium because they cross OS-level trust boundaries or hardware paths. The complete checklist + sign-off block lives in [`docs/RELEASE-MANUAL-SMOKE.md`](./RELEASE-MANUAL-SMOKE.md) — that file is the source of truth for what must be verified per release. Examples of what it covers:
 
 - macOS TCC permission prompts (Accessibility, Input Monitoring, Screen Recording, Microphone)
 - Gatekeeper signature validation on first launch
 - Code-sign integrity (`codesign --verify --deep --strict`)
 - DMG install / drag-to-Applications flow
 - Auto-update download + relaunch
-- OS-native notification toasts on Linux CI (no display server visible to the driver beyond Xvfb)
+- OS-native notification toasts on Linux (no display server visible to the driver beyond Xvfb)
 
 If a feature has no automated coverage AND is not on the manual smoke list, treat it as untested — open a coverage gap.
 
