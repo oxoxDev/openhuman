@@ -25,6 +25,9 @@ import {
   listTeams,
   updateCoreLocalState,
 } from '../services/coreStateApi';
+import { socketService } from '../services/socketService';
+import { persistor, store } from '../store';
+import { resetUserScopedState } from '../store/resetActions';
 import {
   openhumanUpdateAnalyticsSettings,
   restartApp,
@@ -73,6 +76,36 @@ const CoreStateContext = createContext<CoreStateContextValue | null>(null);
 
 function snapshotIdentity(snapshot: CoreAppSnapshot): string | null {
   return snapshot.auth.userId ?? snapshot.currentUser?._id ?? null;
+}
+
+/**
+ * Universal cleanup for identity changes (flip A→B, or sign-out).
+ *
+ * Resets every user-scoped Redux slice via `resetUserScopedState`, drops the
+ * `persist:*` localStorage blobs (otherwise rehydration on the next render or
+ * launch leaks user A's slices into user B's session), and disconnects the
+ * live Socket.IO connection so the next reconnect carries the new auth token.
+ *
+ * Pass `restart: true` for a real flip (A→B): a process restart is needed
+ * because singleton services and Rust-side webview accounts pin the prior
+ * user's state for the lifetime of the process. Pass `restart: false` for
+ * sign-out — the signed-out UI is empty, so a relaunch would be jarring.
+ *
+ * See [#900].
+ */
+async function handleIdentityFlip(opts: { restart: boolean; reason: string }): Promise<void> {
+  const { restart, reason } = opts;
+  log('identity flip cleanup reason=%s restart=%s', reason, restart);
+  store.dispatch(resetUserScopedState());
+  socketService.disconnect();
+  try {
+    await persistor.purge();
+  } catch (error) {
+    console.warn('[core-state] persistor.purge failed during identity flip:', error);
+  }
+  if (restart) {
+    await restartApp();
+  }
 }
 
 function normalizeSnapshot(
@@ -137,23 +170,33 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
     if (!snapshot.sessionToken) {
       logoutGuardUntilRef.current = 0;
     }
+    // Capture pre-commit identity outside the setState updater so flip
+    // detection runs synchronously regardless of React's batching policy.
+    const beforeCommit = getCoreStateSnapshot().snapshot;
+    const shouldIgnoreTokenDuringLogout =
+      Date.now() < logoutGuardUntilRef.current &&
+      !beforeCommit.sessionToken &&
+      Boolean(snapshot.sessionToken);
+    const nextSnapshot = shouldIgnoreTokenDuringLogout ? toSignedOutSnapshot(snapshot) : snapshot;
+    const previousIdentity = snapshotIdentity(beforeCommit);
+    const nextIdentity = snapshotIdentity(nextSnapshot);
+    const previousAuthed = beforeCommit.auth.isAuthenticated;
+    const nextAuthed = nextSnapshot.auth.isAuthenticated;
+    // Only flag a flip when BOTH sides are authenticated and identities differ.
+    // Bootstrap (signed-out → signed-in) and logout transitions are handled
+    // separately so we never restart-loop on launch (#900).
+    const isFlip =
+      Boolean(previousAuthed) &&
+      nextAuthed &&
+      Boolean(previousIdentity) &&
+      previousIdentity !== nextIdentity;
+    const isLogout = Boolean(previousAuthed) && !nextAuthed;
+    const shouldClearScopedCaches = isFlip || isLogout || previousIdentity !== nextIdentity;
+
     commitState(previous => {
       if (requestId !== snapshotRequestIdRef.current) {
         return previous;
       }
-
-      const shouldIgnoreTokenDuringLogout =
-        Date.now() < logoutGuardUntilRef.current &&
-        !previous.snapshot.sessionToken &&
-        Boolean(snapshot.sessionToken);
-      const nextSnapshot = shouldIgnoreTokenDuringLogout ? toSignedOutSnapshot(snapshot) : snapshot;
-
-      const previousIdentity = snapshotIdentity(previous.snapshot);
-      const nextIdentity = snapshotIdentity(nextSnapshot);
-      const shouldClearScopedCaches =
-        previousIdentity !== nextIdentity ||
-        (previous.snapshot.auth.isAuthenticated && !nextSnapshot.auth.isAuthenticated);
-
       return {
         ...previous,
         isBootstrapping: false,
@@ -164,6 +207,16 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
         teamInvitesById: shouldClearScopedCaches ? {} : previous.teamInvitesById,
       };
     });
+
+    if (isFlip) {
+      await handleIdentityFlip({ restart: true, reason: 'refreshCore-flip' }).catch(err => {
+        log('handleIdentityFlip(flip) failed: %O', sanitizeError(err));
+      });
+    } else if (isLogout) {
+      await handleIdentityFlip({ restart: false, reason: 'refreshCore-logout' }).catch(err => {
+        log('handleIdentityFlip(logout) failed: %O', sanitizeError(err));
+      });
+    }
     syncAnalyticsConsent(snapshot.analyticsEnabled);
 
     if (!snapshot.sessionToken) {
@@ -379,7 +432,6 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
 
   const storeSessionToken = useCallback(
     async (token: string, user?: object) => {
-      const previousIdentity = snapshotIdentity(getCoreStateSnapshot().snapshot);
       logoutGuardUntilRef.current = 0;
       await storeSession(token, user ?? {});
       try {
@@ -388,21 +440,16 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
       } catch (error) {
         console.warn('[core-state] memory client sync failed after session store:', error);
       }
+      // refresh() drives refreshCore, which now owns identity-flip detection
+      // and dispatches handleIdentityFlip when both prev and next are
+      // authenticated and identities differ. The previous standalone
+      // restartApp call here was redundant and skipped the persist purge,
+      // letting redux-persist rehydrate the prior user's slices on launch
+      // (#900). Restart now happens inside handleIdentityFlip after purge.
       await refresh();
       await refreshTeams().catch(err => {
         log('refreshTeams failed after session store: %O', sanitizeError(err));
       });
-
-      const nextIdentity = snapshotIdentity(getCoreStateSnapshot().snapshot);
-      if (nextIdentity && previousIdentity !== nextIdentity) {
-        const mask = (s: string | null) =>
-          s == null ? 'none' : s.length > 4 ? `****${s.slice(-4)}` : '****';
-        console.debug('[core-state] user changed; restarting app to switch CEF profile', {
-          previousIdentity: mask(previousIdentity),
-          nextIdentity: mask(nextIdentity),
-        });
-        await restartApp();
-      }
     },
     [refresh, refreshTeams]
   );
@@ -418,6 +465,11 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
       snapshot: toSignedOutSnapshot(previous.snapshot),
     }));
     memoryTokenRef.current = null;
+    // Reset every user-scoped slice + purge persist + drop the live socket
+    // before the tauriLogout RPC so user A's data is gone the moment the UI
+    // re-renders signed-out (#900). No restart — signed-out UI is empty;
+    // the next storeSessionToken (login as B) will restart via refreshCore.
+    await handleIdentityFlip({ restart: false, reason: 'clearSession' });
     await tauriLogout();
     await refresh().catch(err => {
       log('refresh failed after clearSession: %O', sanitizeError(err));
