@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.head_ref || github.ref }}
   cancel-in-progress: true
 jobs:
+  # All three jobs are `continue-on-error: true` for the first ~2 weeks after
+  # this workflow lands, so we can tune the parsers + matrix gates without
+  # blocking merges. Flip to hard-fail once the false-positive rate is stable.
   checklist-guard:
     name: PR Submission Checklist
     runs-on: ubuntu-latest

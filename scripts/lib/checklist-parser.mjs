@@ -1,12 +1,18 @@
 const ITEM_REGEX = /^- \[( |x|X)\] (.*)$/;
-const NA_REGEX = /^\s*\(?N\/A\)?\b[:\s.-]*(.*)$/i;
+const NA_REGEX = /^\s*(?:\(N\/A\)|N\/A\b)[:\s.-]*(.*)$/i;
 
 export function parseChecklist(body) {
   const items = [];
   if (typeof body !== 'string' || body.length === 0) {
     return { items, totalUnchecked: 0 };
   }
+  let inFence = false;
   for (const rawLine of body.split(/\r?\n/)) {
+    if (/^\s*```/.test(rawLine)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     const match = rawLine.match(ITEM_REGEX);
     if (!match) continue;
     const checked = match[1] === 'x' || match[1] === 'X';

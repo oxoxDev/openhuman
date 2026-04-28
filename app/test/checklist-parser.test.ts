@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 // @ts-expect-error — pure ESM module under repo-root scripts/, no .d.ts
-import { parseChecklist, summarize } from '../../../scripts/lib/checklist-parser.mjs';
+import { parseChecklist, summarize } from '../../scripts/lib/checklist-parser.mjs';
 
 describe('parseChecklist', () => {
   it('returns zero items for empty body', () => {
@@ -50,5 +50,19 @@ describe('parseChecklist', () => {
     expect(result.items.map(i => i.checked)).toEqual([true, true, false]);
     const summary = summarize(result);
     expect(summary).toContain('2/3 items satisfied');
+  });
+
+  it('skips checklist markers inside fenced code blocks', () => {
+    const body = `- [x] Real checked item
+\`\`\`
+- [ ] This is a code-block example, not a real checklist item
+- [ ] Another decoy in the fence
+\`\`\`
+- [ ] Real unchecked item`;
+    const result = parseChecklist(body);
+    expect(result.items).toHaveLength(2);
+    expect(result.items[0].text).toBe('Real checked item');
+    expect(result.items[1].text).toBe('Real unchecked item');
+    expect(result.totalUnchecked).toBe(1);
   });
 });

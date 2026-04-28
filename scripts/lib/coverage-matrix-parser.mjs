@@ -18,6 +18,7 @@ export function parseMatrix(markdown) {
     }
     if (!VALID_STATUS.has(status)) {
       errors.push(`Row ${id}: invalid status "${status}" (must be one of ${[...VALID_STATUS].join(' ')})`);
+      continue;
     }
     rows.push({ id, name, layer, path, status, notes });
   }

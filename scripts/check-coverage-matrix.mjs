@@ -6,8 +6,16 @@ import { parseMatrix, validateAgainstCatalog } from './lib/coverage-matrix-parse
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
-const matrixMd = await readFile(join(repoRoot, 'docs/TEST-COVERAGE-MATRIX.md'), 'utf8');
-const catalog = JSON.parse(await readFile(join(repoRoot, 'scripts/feature-ids.json'), 'utf8'));
+
+let matrixMd;
+let catalog;
+try {
+  matrixMd = await readFile(join(repoRoot, 'docs/TEST-COVERAGE-MATRIX.md'), 'utf8');
+  catalog = JSON.parse(await readFile(join(repoRoot, 'scripts/feature-ids.json'), 'utf8'));
+} catch (err) {
+  console.error(`Failed to read inputs: ${err.message}`);
+  process.exit(1);
+}
 
 const parsed = parseMatrix(matrixMd);
 const validation = validateAgainstCatalog(parsed.rows, catalog.ids);
