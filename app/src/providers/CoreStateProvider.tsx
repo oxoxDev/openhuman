@@ -28,7 +28,7 @@ import {
 import { socketService } from '../services/socketService';
 import { store } from '../store';
 import { resetUserScopedState } from '../store/resetActions';
-import { setActiveUserId } from '../store/userScopedStorage';
+import { getActiveUserId, setActiveUserId } from '../store/userScopedStorage';
 import {
   openhumanUpdateAnalyticsSettings,
   restartApp,
@@ -161,13 +161,12 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
   const logoutGuardUntilRef = useRef(0);
   const bootstrapFailCountRef = useRef(0);
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
-  // The userId whose `${id}:persist:*` blob is currently in memory. Set on
-  // first auth landing (cold bootstrap) and after a successful flip-restart.
-  // Used to decide whether a signed-out → signed-in transition is a real
-  // re-login (data is on disk under a different namespace, restart to
-  // re-hydrate) or a same-user re-login (in-memory state survived a logout
-  // window because we don't reset on logout). See [#900].
-  const lastAuthedUserIdRef = useRef<string | null>(null);
+  // The userId whose `${id}:persist:*` blob is currently in memory. Initialized
+  // from `getActiveUserId()` so the first refresh after mount knows which
+  // namespace was hydrated by redux-persist's module-init pass — a different
+  // userId landing means we have to restart so persistor re-hydrates from the
+  // new namespace. See [#900].
+  const lastAuthedUserIdRef = useRef<string | null>(getActiveUserId());
 
   const commitState = useCallback((updater: (previous: CoreState) => CoreState) => {
     setState(previous => {
@@ -195,27 +194,28 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
     const nextIdentity = snapshotIdentity(nextSnapshot);
     const previousAuthed = beforeCommit.auth.isAuthenticated;
     const nextAuthed = nextSnapshot.auth.isAuthenticated;
-    // Auth-to-auth identity flip (e.g., one window force-switches user mid-session).
-    const isAuthFlip =
-      Boolean(previousAuthed) &&
-      nextAuthed &&
-      Boolean(previousIdentity) &&
-      previousIdentity !== nextIdentity;
-    // Re-login as a DIFFERENT user (signed-out → signed-in, current id !=
-    // last-seen). The clearSession → storeSessionToken sequence always
-    // routes through this branch since clearSession sets isAuthenticated=false.
-    const isReLoginFlip =
-      !previousAuthed &&
-      nextAuthed &&
+    // Identity flip detection is purely "is the in-memory data for a different
+    // user than the one who just authenticated?". `lastAuthedUserIdRef` tracks
+    // whose namespace redux-persist hydrated. If a different non-null userId
+    // lands, we have to restart so persistor re-hydrates from the new
+    // namespace. This rule covers every login path uniformly:
+    //   - direct `storeSessionToken` (Tauri OAuth)
+    //   - deep-link `core-state:session-token-updated` (where the synchronous
+    //     pre-refresh commit already flipped `auth.isAuthenticated=true`, so
+    //     `previousAuthed` is true but `previousIdentity` is still null —
+    //     previous-state-based heuristics get fooled)
+    //   - poll-detected flip (core-side user swap)
+    const isFlip =
       Boolean(nextIdentity) &&
       lastAuthedUserIdRef.current !== null &&
       lastAuthedUserIdRef.current !== nextIdentity;
-    const isFlip = isAuthFlip || isReLoginFlip;
     const isLogout = Boolean(previousAuthed) && !nextAuthed;
-    const isInitialAuth = !previousAuthed && nextAuthed && Boolean(nextIdentity) && !isReLoginFlip;
-    // Clear team caches whenever the visible identity changes (any direction)
-    // so the post-commit UI doesn't show A's team list during the brief
-    // signed-out window or B's session.
+    // Cold bootstrap OR same-user re-login: a userId landed and it matches
+    // (or is the first ever lookup against a null ref).
+    const isInitialOrSameUserAuth = Boolean(nextIdentity) && !isFlip;
+    // Clear team caches whenever the visible identity changes (in-memory user
+    // shift) so the post-commit UI doesn't show user A's team list during the
+    // brief signed-out window or user B's session.
     const shouldClearScopedCaches = isFlip || isLogout || previousIdentity !== nextIdentity;
 
     commitState(previous => {
@@ -234,30 +234,26 @@ export default function CoreStateProvider({ children }: { children: ReactNode })
     });
 
     if (isFlip && nextIdentity) {
-      // Track the new identity before triggering restart so that a test (or
-      // a no-op restartApp mock) sees the ref updated; in production the
-      // page reloads and the ref is rebuilt on next mount anyway.
+      // Track the new identity before triggering restart so a test (or a
+      // no-op restartApp mock) sees the ref updated; in production the page
+      // reloads and the ref is rebuilt from `getActiveUserId()` on next mount.
       lastAuthedUserIdRef.current = nextIdentity;
-      await handleIdentityFlip({
-        reason: isAuthFlip ? 'auth-flip' : 'relogin-different-user',
-        nextUserId: nextIdentity,
-      }).catch(err => {
+      await handleIdentityFlip({ reason: 'identity-flip', nextUserId: nextIdentity }).catch(err => {
         log('handleIdentityFlip failed: %O', sanitizeError(err));
       });
     } else if (isLogout) {
       // Sign-out: keep slice data in memory (signed-out UI doesn't expose
-      // it) so a same-user re-login can keep showing the user's accounts /
+      // it) so a same-user re-login keeps showing the user's accounts /
       // threads / notifications without a costly process restart. Drop the
       // active user id so any stray persist write during the signed-out
       // window is a no-op, and disconnect the live socket since the token
       // it was authed with has been invalidated by the core.
       setActiveUserId(null);
       socketService.disconnect();
-    } else if (isInitialAuth && nextIdentity) {
-      // Cold bootstrap OR same-user re-login (signed-out → signed-in where
-      // the next id matches the last-seen id). Either way redux-persist's
+    } else if (isInitialOrSameUserAuth && nextIdentity) {
+      // Cold bootstrap OR same-user re-login. Either way redux-persist's
       // initial hydrate already loaded the right namespace into memory, so
-      // just seed the active user id and continue.
+      // just seed the active user id and the ref and continue.
       setActiveUserId(nextIdentity);
       lastAuthedUserIdRef.current = nextIdentity;
     }
