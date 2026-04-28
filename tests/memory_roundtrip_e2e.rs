@@ -30,7 +30,9 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn set_to_path(key: &'static str, path: &Path) -> Self {
         let old = std::env::var(key).ok();
-        std::env::set_var(key, path.as_os_str());
+        // SAFETY: EnvVarGuard is only used in tests that first acquire
+        // env_lock(), which serializes process-global env mutations.
+        unsafe { std::env::set_var(key, path.as_os_str()) };
         Self { key, old }
     }
 }
@@ -38,8 +40,11 @@ impl EnvVarGuard {
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         match &self.old {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
+            // SAFETY: See EnvVarGuard::set_to_path; teardown runs under the same
+            // env_lock() critical section as setup.
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            // SAFETY: Guarded by env_lock(), preventing concurrent env access.
+            None => unsafe { std::env::remove_var(self.key) },
         }
     }
 }
