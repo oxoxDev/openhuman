@@ -56,6 +56,35 @@ pub fn placeholder_url(account_id: &str) -> String {
     format!("about:blank#{}", placeholder_marker(account_id))
 }
 
+/// Extract the origin (`scheme://host[:port]`) from an absolute URL string.
+/// Used to scope `Browser.grantPermissions` — the CDP method requires an
+/// origin (no path / no fragment) and rejects malformed input.
+///
+/// Returns `None` for non-`http(s)://` schemes (e.g. `about:blank`,
+/// `data:`, `blob:`) where the grant has no meaningful target.
+fn origin_of(url: &str) -> Option<String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+    let bytes = url.as_bytes();
+    let mut slashes = 0;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'/' {
+            slashes += 1;
+            if slashes == 3 {
+                return Some(url[..idx].to_string());
+            }
+        }
+        idx += 1;
+    }
+    if slashes == 2 {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
 fn target_matches_account_url(target_url: &str, account_id: &str) -> bool {
     let marker = placeholder_marker(account_id);
     let marker_fragment = format!("#{marker}");
@@ -231,6 +260,42 @@ async fn run_session_cycle<R: Runtime>(
         "[cdp-session][{}] notification permission stub injected",
         account_id
     );
+
+    // The JS shim above masks `Notification.permission` so providers stop
+    // showing "enable notifications" banners, but it does NOT cause CEF's
+    // real native-toast pipeline to fire. For that we have to actually grant
+    // `notifications` for the provider's origin via the browser-level
+    // `Browser.grantPermissions` CDP method (sessionId = None routes to the
+    // browser target). With this grant, `new Notification(...)` from the
+    // page reaches the CEF helper's notify-IPC, which posts back to
+    // `forward_native_notification` in `webview_accounts`. Without it,
+    // the constructor silently no-ops and no toast ever fires (#1016).
+    if let Some(origin) = origin_of(&real_url) {
+        if let Err(e) = cdp
+            .call(
+                "Browser.grantPermissions",
+                json!({
+                    "origin": origin,
+                    "permissions": ["notifications"],
+                }),
+                None,
+            )
+            .await
+        {
+            log::warn!(
+                "[cdp-session][{}] Browser.grantPermissions(notifications) for {} failed: {}",
+                account_id,
+                origin,
+                e
+            );
+        } else {
+            log::info!(
+                "[cdp-session][{}] granted notifications for origin={}",
+                account_id,
+                origin
+            );
+        }
+    }
 
     // Enable the Page domain so `Page.loadEventFired` reaches our
     // `pump_events` callback below. Must happen BEFORE `Page.navigate` so
