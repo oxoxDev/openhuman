@@ -58,30 +58,30 @@ pub fn placeholder_url(account_id: &str) -> String {
 
 /// Extract the origin (`scheme://host[:port]`) from an absolute URL string.
 /// Used to scope `Browser.grantPermissions` — the CDP method requires an
-/// origin (no path / no fragment) and rejects malformed input.
+/// origin (no path / no fragment / no query) and rejects malformed input.
 ///
 /// Returns `None` for non-`http(s)://` schemes (e.g. `about:blank`,
-/// `data:`, `blob:`) where the grant has no meaningful target.
+/// `data:`, `blob:`) where the grant has no meaningful target, and for
+/// any input that fails to parse as an absolute URL.
+///
+/// Implementation note: uses Tauri's re-exported `url::Url` so query
+/// strings, fragments, userinfo, and IPv6 hosts are handled correctly
+/// instead of relying on raw byte counting.
 fn origin_of(url: &str) -> Option<String> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    let parsed = tauri::Url::parse(url).ok()?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
         return None;
     }
-    let bytes = url.as_bytes();
-    let mut slashes = 0;
-    let mut idx = 0;
-    while idx < bytes.len() {
-        if bytes[idx] == b'/' {
-            slashes += 1;
-            if slashes == 3 {
-                return Some(url[..idx].to_string());
-            }
-        }
-        idx += 1;
-    }
-    if slashes == 2 {
-        Some(url.to_string())
+    // `Url::host_str` is the canonical lowercased host. We only emit a
+    // bare `scheme://host[:port]` triple — no userinfo, no path, no
+    // query, no fragment — since `Browser.grantPermissions` rejects
+    // anything else as a malformed origin.
+    let host = parsed.host_str()?;
+    if let Some(port) = parsed.port() {
+        Some(format!("{scheme}://{host}:{port}"))
     } else {
-        None
+        Some(format!("{scheme}://{host}"))
     }
 }
 
@@ -355,6 +355,47 @@ mod tests {
         assert_eq!(
             placeholder_url("acct-42"),
             "about:blank#openhuman-acct-acct-42"
+        );
+    }
+
+    #[test]
+    fn origin_of_strips_path_query_and_fragment() {
+        assert_eq!(
+            origin_of("https://app.slack.com/client/T123/C456?foo=bar#frag"),
+            Some("https://app.slack.com".to_string())
+        );
+    }
+
+    #[test]
+    fn origin_of_preserves_explicit_port() {
+        assert_eq!(
+            origin_of("http://localhost:7788/health"),
+            Some("http://localhost:7788".to_string())
+        );
+    }
+
+    #[test]
+    fn origin_of_returns_none_for_non_http_schemes() {
+        assert_eq!(origin_of("about:blank"), None);
+        assert_eq!(origin_of("data:text/plain,hello"), None);
+        assert_eq!(origin_of("blob:https://app.slack.com/abc"), None);
+        assert_eq!(origin_of("file:///etc/hosts"), None);
+    }
+
+    #[test]
+    fn origin_of_returns_none_for_malformed_input() {
+        assert_eq!(origin_of(""), None);
+        assert_eq!(origin_of("not-a-url"), None);
+        assert_eq!(origin_of("http://"), None);
+    }
+
+    #[test]
+    fn origin_of_lowercases_host() {
+        // tauri::Url normalises to lowercase host so we never grant
+        // permissions twice for `Slack.com` vs `slack.com`.
+        assert_eq!(
+            origin_of("https://APP.SLACK.COM/client"),
+            Some("https://app.slack.com".to_string())
         );
     }
 
