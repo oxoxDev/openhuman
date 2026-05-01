@@ -2080,7 +2080,9 @@ pub async fn webview_account_purge<R: Runtime>(
         .remove(&args.account_id);
 
     let data_dir = data_directory_for(&app, &args.account_id)?;
-    purge_data_dir_with_retry(&data_dir).await;
+    purge_data_dir_with_retry(&data_dir)
+        .await
+        .map_err(|e| format!("purge data dir {}: {e}", data_dir.display()))?;
 
     log::info!(
         "[webview-accounts] purged account={} label={:?}",
@@ -2098,9 +2100,9 @@ pub async fn webview_account_purge<R: Runtime>(
 /// Retry the deletion a handful of times with exponential backoff so the
 /// subprocess has a chance to drop its handles. Logs every attempt so a
 /// stuck handle is diagnosable from the audit log.
-async fn purge_data_dir_with_retry(data_dir: &std::path::Path) {
+async fn purge_data_dir_with_retry(data_dir: &std::path::Path) -> std::io::Result<()> {
     if !data_dir.exists() {
-        return;
+        return Ok(());
     }
     const MAX_ATTEMPTS: u32 = 5;
     const INITIAL_BACKOFF_MS: u64 = 100;
@@ -2114,7 +2116,16 @@ async fn purge_data_dir_with_retry(data_dir: &std::path::Path) {
                     attempt,
                     MAX_ATTEMPTS
                 );
-                return;
+                return Ok(());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                log::info!(
+                    "[webview-accounts] purge data dir {} already removed before attempt {}/{}",
+                    data_dir.display(),
+                    attempt,
+                    MAX_ATTEMPTS
+                );
+                return Ok(());
             }
             Err(err) if attempt < MAX_ATTEMPTS => {
                 log::debug!(
@@ -2135,9 +2146,11 @@ async fn purge_data_dir_with_retry(data_dir: &std::path::Path) {
                     MAX_ATTEMPTS,
                     err
                 );
+                return Err(err);
             }
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2927,7 +2940,9 @@ mod tests {
         assert!(!dir.exists());
 
         // Should return without error or panic.
-        purge_data_dir_with_retry(&dir).await;
+        purge_data_dir_with_retry(&dir)
+            .await
+            .expect("missing dir should be treated as success");
 
         assert!(!dir.exists());
     }
@@ -2949,7 +2964,9 @@ mod tests {
             .expect("write nested file");
         assert!(dir.exists());
 
-        purge_data_dir_with_retry(&dir).await;
+        purge_data_dir_with_retry(&dir)
+            .await
+            .expect("existing dir should be removed");
 
         assert!(!dir.exists(), "data dir should be removed");
     }
