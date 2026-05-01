@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getBackendUrl } from '../../../services/backendUrl';
+import { getDeepLinkAuthState } from '../../../store/deepLinkAuthState';
 import { openUrl } from '../../../utils/openUrl';
 import { isTauri } from '../../../utils/tauriCommands';
 import OAuthProviderButton from '../OAuthProviderButton';
@@ -12,7 +13,7 @@ vi.mock('../../../utils/openUrl', () => ({ openUrl: vi.fn() }));
 
 vi.mock('../../../utils/tauriCommands', () => ({ isTauri: vi.fn() }));
 
-vi.mock('../../../utils/config', () => ({ IS_DEV: false }));
+vi.mock('../../../store/deepLinkAuthState', () => ({ getDeepLinkAuthState: vi.fn() }));
 
 const stubProvider = {
   id: 'google' as const,
@@ -32,6 +33,7 @@ describe('OAuthProviderButton', () => {
     vi.mocked(getBackendUrl).mockResolvedValue('https://backend.test');
     vi.mocked(openUrl).mockResolvedValue(undefined);
     vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(getDeepLinkAuthState).mockReturnValue({ isProcessing: false, errorMessage: null });
   });
 
   afterEach(() => {
@@ -52,7 +54,9 @@ describe('OAuthProviderButton', () => {
     });
 
     expect(getBackendUrl).toHaveBeenCalledTimes(1);
-    expect(openUrl).toHaveBeenCalledWith('https://backend.test/auth/google/login');
+    expect(openUrl).toHaveBeenCalledWith(
+      expect.stringMatching(/^https:\/\/backend\.test\/auth\/google\/login(\?.*)?$/)
+    );
     expect(screen.getByRole('button', { name: /Connecting/ })).toBeDisabled();
   });
 
@@ -69,6 +73,50 @@ describe('OAuthProviderButton', () => {
 
     await act(async () => {
       window.dispatchEvent(new FocusEvent('focus'));
+    });
+
+    expect(screen.queryByText('Connecting...')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Google' })).toBeEnabled();
+  });
+
+  it('does NOT reset isLoading on focus when a deep-link auth round-trip is processing', async () => {
+    vi.mocked(getDeepLinkAuthState).mockReturnValue({ isProcessing: true, errorMessage: null });
+
+    render(<OAuthProviderButton provider={stubProvider} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Google' }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Connecting...')).toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new FocusEvent('focus'));
+    });
+
+    expect(screen.getByText('Connecting...')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Connecting/ })).toBeDisabled();
+  });
+
+  it('resets isLoading on visibilitychange to visible', async () => {
+    render(<OAuthProviderButton provider={stubProvider} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Google' }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Connecting...')).toBeInTheDocument();
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
     });
 
     expect(screen.queryByText('Connecting...')).not.toBeInTheDocument();
