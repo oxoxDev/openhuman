@@ -404,4 +404,29 @@ mod tests {
         let got = append_user_id_to_public_links(text, Some("nikhil"));
         assert_eq!(got, "Click https://openhm.xyz/abc?u=nikhil.");
     }
+
+    #[test]
+    fn rewrite_outbound_for_user_expands_placeholder_and_tags_public_url() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = test_config(&tmp);
+
+        // Shorten LONG into an openhuman:// placeholder, then craft outbound text
+        // that mixes the placeholder with a public openhm.xyz URL.
+        let inbound = rewrite_inbound(&cfg, LONG).unwrap();
+        let placeholder = &inbound.replacements[0].replacement;
+        let text = format!("see {placeholder} and https://openhm.xyz/abc");
+
+        let result = rewrite_outbound_for_user(&cfg, &text, Some("nikhil")).unwrap();
+        assert!(result.text.contains(LONG), "placeholder must expand back to LONG");
+        assert!(
+            result.text.contains("https://openhm.xyz/abc?u=nikhil"),
+            "openhm.xyz URL must carry ?u= tag"
+        );
+
+        // None user_id leaves openhm.xyz untouched but still expands placeholder.
+        let result_none = rewrite_outbound_for_user(&cfg, &text, None).unwrap();
+        assert!(result_none.text.contains(LONG));
+        assert!(result_none.text.contains("https://openhm.xyz/abc"));
+        assert!(!result_none.text.contains("?u="));
+    }
 }
