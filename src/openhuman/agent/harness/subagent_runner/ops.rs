@@ -1047,28 +1047,31 @@ async fn run_inner_loop(
         }
     };
 
-    let append_worker_message = |content: String, sender: String, extra_metadata: serde_json::Value| {
-        if let Some(ref thread_id) = worker_thread_id {
-            let message = ConversationMessage {
-                id: format!("{}:{}", sender, uuid::Uuid::new_v4()),
-                content,
-                message_type: "text".to_string(),
-                extra_metadata,
-                sender,
-                created_at: chrono::Utc::now().to_rfc3339(),
-            };
-            if let Err(err) =
-                crate::openhuman::memory::conversations::append_message(parent.workspace_dir.clone(), thread_id, message)
-            {
-                tracing::debug!(
-                    agent_id = %agent_id,
-                    thread_id = %thread_id,
-                    error = %err,
-                    "[subagent_runner] failed to append message to worker thread"
-                );
+    let append_worker_message =
+        |content: String, sender: String, extra_metadata: serde_json::Value| {
+            if let Some(ref thread_id) = worker_thread_id {
+                let message = ConversationMessage {
+                    id: format!("{}:{}", sender, uuid::Uuid::new_v4()),
+                    content,
+                    message_type: "text".to_string(),
+                    extra_metadata,
+                    sender,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Err(err) = crate::openhuman::memory::conversations::append_message(
+                    parent.workspace_dir.clone(),
+                    thread_id,
+                    message,
+                ) {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        thread_id = %thread_id,
+                        error = %err,
+                        "[subagent_runner] failed to append message to worker thread"
+                    );
+                }
             }
-        }
-    };
+        };
 
     // Per-turn progress sink shared with the parent — `None` for runs
     // that don't have a subscriber (CLI / triage / tests). Cloned upfront

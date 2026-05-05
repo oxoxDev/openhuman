@@ -11,9 +11,7 @@
 
 use crate::openhuman::agent::harness::definition::AgentDefinitionRegistry;
 use crate::openhuman::agent::harness::fork_context::current_parent;
-use crate::openhuman::agent::harness::subagent_runner::{
-    run_subagent, SubagentRunOptions,
-};
+use crate::openhuman::agent::harness::subagent_runner::{run_subagent, SubagentRunOptions};
 use crate::openhuman::memory::conversations::{
     self, ConversationMessage, CreateConversationThread,
 };
@@ -98,11 +96,29 @@ impl Tool for SpawnWorkerThreadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let agent_id = args.get("agent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let task_title = args.get("task_title").and_then(|v| v.as_str()).unwrap_or("Worker Task").to_string();
-        let context = args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let toolkit_override = args.get("toolkit").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let agent_id = args
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt = args
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let task_title = args
+            .get("task_title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Worker Task")
+            .to_string();
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let toolkit_override = args
+            .get("toolkit")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         if agent_id.is_empty() || prompt.is_empty() {
             return Ok(ToolResult::error("agent_id and prompt are required"));
@@ -118,7 +134,9 @@ impl Tool for SpawnWorkerThreadTool {
         let threads = conversations::list_threads(parent.workspace_dir.clone())
             .map_err(|e| anyhow::anyhow!(e))?;
         if let Some(current_thread) = threads.iter().find(|t| t.id == current_thread_id) {
-            if current_thread.labels.contains(&"worker".to_string()) || current_thread.parent_thread_id.is_some() {
+            if current_thread.labels.contains(&"worker".to_string())
+                || current_thread.parent_thread_id.is_some()
+            {
                 return Ok(ToolResult::error("Worker threads cannot spawn other worker threads. Depth is capped at 1. Use spawn_subagent for inline delegation instead."));
             }
         }
@@ -126,7 +144,8 @@ impl Tool for SpawnWorkerThreadTool {
         let registry = AgentDefinitionRegistry::global()
             .ok_or_else(|| anyhow::anyhow!("AgentDefinitionRegistry not initialised"))?;
 
-        let definition = registry.get(&agent_id)
+        let definition = registry
+            .get(&agent_id)
             .ok_or_else(|| anyhow::anyhow!("agent_id '{}' not found", agent_id))?;
 
         // ── Create Worker Thread ───────────────────────────────────────
@@ -142,7 +161,8 @@ impl Tool for SpawnWorkerThreadTool {
                 parent_thread_id: Some(current_thread_id.clone()),
                 labels: Some(vec!["worker".to_string()]),
             },
-        ).map_err(|e| anyhow::anyhow!(e))?;
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
         // Append initial user message to the worker thread
         conversations::append_message(
@@ -159,7 +179,8 @@ impl Tool for SpawnWorkerThreadTool {
                 sender: "user".to_string(),
                 created_at: now,
             },
-        ).map_err(|e| anyhow::anyhow!(e))?;
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
 
         // We don't have an easy way to append a system message to the parent
         // thread here without triggering a re-render of the history the model
@@ -191,9 +212,9 @@ impl Tool for SpawnWorkerThreadTool {
                 );
                 Ok(ToolResult::success(parent_visible))
             }
-            Err(err) => {
-                Ok(ToolResult::error(format!("Worker thread execution failed: {err}")))
-            }
+            Err(err) => Ok(ToolResult::error(format!(
+                "Worker thread execution failed: {err}"
+            ))),
         }
     }
 }
@@ -201,37 +222,97 @@ impl Tool for SpawnWorkerThreadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openhuman::agent::harness::definition::{
+        AgentDefinition, DefinitionSource, ModelSpec, PromptSource, SandboxMode, ToolScope,
+    };
+    use crate::openhuman::agent::harness::fork_context::with_parent_context;
+    use crate::openhuman::agent::harness::ParentExecutionContext;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use crate::openhuman::agent::harness::ParentExecutionContext;
-    use crate::openhuman::agent::harness::fork_context::with_parent_context;
-    use crate::openhuman::agent::harness::definition::{AgentDefinition, ModelSpec, ToolScope, PromptSource, DefinitionSource, SandboxMode};
-    use std::path::PathBuf;
 
     struct MockProvider;
     #[async_trait]
     impl crate::openhuman::providers::Provider for MockProvider {
-        async fn chat_with_system(&self, _: Option<&str>, _: &str, _: &str, _: f64) -> anyhow::Result<String> {
+        async fn chat_with_system(
+            &self,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: f64,
+        ) -> anyhow::Result<String> {
             Ok("".into())
         }
-        async fn chat(&self, _: crate::openhuman::providers::ChatRequest<'_>, _: &str, _: f64) -> anyhow::Result<crate::openhuman::providers::ChatResponse> {
-            Ok(crate::openhuman::providers::ChatResponse { text: Some("done".into()), tool_calls: vec![], usage: None })
+        async fn chat(
+            &self,
+            _: crate::openhuman::providers::ChatRequest<'_>,
+            _: &str,
+            _: f64,
+        ) -> anyhow::Result<crate::openhuman::providers::ChatResponse> {
+            Ok(crate::openhuman::providers::ChatResponse {
+                text: Some("done".into()),
+                tool_calls: vec![],
+                usage: None,
+            })
         }
-        fn supports_native_tools(&self) -> bool { true }
+        fn supports_native_tools(&self) -> bool {
+            true
+        }
     }
 
     struct MockMemory;
     #[async_trait]
     impl crate::openhuman::memory::Memory for MockMemory {
-        async fn store(&self, _: &str, _: &str, _: &str, _: crate::openhuman::memory::MemoryCategory, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-        async fn recall(&self, _: &str, _: usize, _: crate::openhuman::memory::RecallOpts<'_>) -> anyhow::Result<Vec<crate::openhuman::memory::MemoryEntry>> { Ok(vec![]) }
-        async fn get(&self, _: &str, _: &str) -> anyhow::Result<Option<crate::openhuman::memory::MemoryEntry>> { Ok(None) }
-        async fn list(&self, _: Option<&str>, _: Option<&crate::openhuman::memory::MemoryCategory>, _: Option<&str>) -> anyhow::Result<Vec<crate::openhuman::memory::MemoryEntry>> { Ok(vec![]) }
-        async fn forget(&self, _: &str, _: &str) -> anyhow::Result<bool> { Ok(true) }
-        async fn namespace_summaries(&self) -> anyhow::Result<Vec<crate::openhuman::memory::NamespaceSummary>> { Ok(vec![]) }
-        async fn count(&self) -> anyhow::Result<usize> { Ok(0) }
-        async fn health_check(&self) -> bool { true }
-        fn name(&self) -> &str { "mock" }
+        async fn store(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: crate::openhuman::memory::MemoryCategory,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn recall(
+            &self,
+            _: &str,
+            _: usize,
+            _: crate::openhuman::memory::RecallOpts<'_>,
+        ) -> anyhow::Result<Vec<crate::openhuman::memory::MemoryEntry>> {
+            Ok(vec![])
+        }
+        async fn get(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<Option<crate::openhuman::memory::MemoryEntry>> {
+            Ok(None)
+        }
+        async fn list(
+            &self,
+            _: Option<&str>,
+            _: Option<&crate::openhuman::memory::MemoryCategory>,
+            _: Option<&str>,
+        ) -> anyhow::Result<Vec<crate::openhuman::memory::MemoryEntry>> {
+            Ok(vec![])
+        }
+        async fn forget(&self, _: &str, _: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn namespace_summaries(
+            &self,
+        ) -> anyhow::Result<Vec<crate::openhuman::memory::NamespaceSummary>> {
+            Ok(vec![])
+        }
+        async fn count(&self) -> anyhow::Result<usize> {
+            Ok(0)
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
     }
 
     fn test_parent_ctx(workspace_dir: PathBuf) -> ParentExecutionContext {
@@ -261,55 +342,77 @@ mod tests {
     async fn rejects_if_already_worker_thread() {
         let temp = TempDir::new().unwrap();
         let thread_id = "worker-123";
-        conversations::ensure_thread(temp.path().to_path_buf(), CreateConversationThread {
-            id: thread_id.to_string(),
-            title: "Worker".into(),
-            created_at: "now".into(),
-            parent_thread_id: None,
-            labels: Some(vec!["worker".to_string()]),
-        }).unwrap();
+        conversations::ensure_thread(
+            temp.path().to_path_buf(),
+            CreateConversationThread {
+                id: thread_id.to_string(),
+                title: "Worker".into(),
+                created_at: "now".into(),
+                parent_thread_id: None,
+                labels: Some(vec!["worker".to_string()]),
+            },
+        )
+        .unwrap();
 
         crate::openhuman::providers::thread_context::with_thread_id(thread_id.to_string(), async {
             let parent = test_parent_ctx(temp.path().to_path_buf());
             with_parent_context(parent, async {
                 let tool = SpawnWorkerThreadTool::new();
-                let result = tool.execute(json!({
-                    "agent_id": "researcher",
-                    "prompt": "do it",
-                    "task_title": "Task"
-                })).await.unwrap();
+                let result = tool
+                    .execute(json!({
+                        "agent_id": "researcher",
+                        "prompt": "do it",
+                        "task_title": "Task"
+                    }))
+                    .await
+                    .unwrap();
 
                 assert!(result.is_error);
-                assert!(result.output().contains("cannot spawn other worker threads"));
-            }).await;
-        }).await;
+                assert!(result
+                    .output()
+                    .contains("cannot spawn other worker threads"));
+            })
+            .await;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn rejects_if_has_parent_thread_id() {
         let temp = TempDir::new().unwrap();
         let thread_id = "sub-123";
-        conversations::ensure_thread(temp.path().to_path_buf(), CreateConversationThread {
-            id: thread_id.to_string(),
-            title: "Sub".into(),
-            created_at: "now".into(),
-            parent_thread_id: Some("parent".into()),
-            labels: None,
-        }).unwrap();
+        conversations::ensure_thread(
+            temp.path().to_path_buf(),
+            CreateConversationThread {
+                id: thread_id.to_string(),
+                title: "Sub".into(),
+                created_at: "now".into(),
+                parent_thread_id: Some("parent".into()),
+                labels: None,
+            },
+        )
+        .unwrap();
 
         crate::openhuman::providers::thread_context::with_thread_id(thread_id.to_string(), async {
             let parent = test_parent_ctx(temp.path().to_path_buf());
             with_parent_context(parent, async {
                 let tool = SpawnWorkerThreadTool::new();
-                let result = tool.execute(json!({
-                    "agent_id": "researcher",
-                    "prompt": "do it",
-                    "task_title": "Task"
-                })).await.unwrap();
+                let result = tool
+                    .execute(json!({
+                        "agent_id": "researcher",
+                        "prompt": "do it",
+                        "task_title": "Task"
+                    }))
+                    .await
+                    .unwrap();
 
                 assert!(result.is_error);
-                assert!(result.output().contains("cannot spawn other worker threads"));
-            }).await;
-        }).await;
+                assert!(result
+                    .output()
+                    .contains("cannot spawn other worker threads"));
+            })
+            .await;
+        })
+        .await;
     }
 }
