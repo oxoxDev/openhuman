@@ -240,6 +240,22 @@ fn is_provider_native_deep_link_scheme(scheme: &str) -> bool {
     )
 }
 
+/// `true` if this provider lets users sign in with their Google
+/// account from inside the embedded webview.
+///
+/// Slack workspaces commonly enable "Sign in with Google" SSO, so the
+/// Google OAuth popup flow (`window.open("https://accounts.google.com/...")`)
+/// must stay in the per-account CEF session — exactly the same way it
+/// has to for Google Meet. Routing it to the system browser leaks the
+/// auth cookie into the wrong jar and breaks sign-in (#1036).
+///
+/// Keep this list narrow: only providers that actually need to issue
+/// `accounts.google.com` popups should be listed. Other providers
+/// continue to fall through to the default popup-handling path.
+fn provider_supports_google_sso(provider: &str) -> bool {
+    matches!(provider, "google-meet" | "slack")
+}
+
 /// `true` if a popup request should be denied AND the parent webview
 /// should be navigated to the popup URL instead.
 ///
@@ -3042,6 +3058,22 @@ mod tests {
             popup_should_navigate_parent("google-meet", &url("https://example.com/blog"),)
                 .is_none()
         );
+    }
+
+    // ── provider_supports_google_sso ───────────────────────────────────
+
+    #[test]
+    fn provider_supports_google_sso_matrix() {
+        assert!(provider_supports_google_sso("google-meet"));
+        assert!(provider_supports_google_sso("slack"));
+        assert!(!provider_supports_google_sso("whatsapp"));
+        assert!(!provider_supports_google_sso("telegram"));
+        assert!(!provider_supports_google_sso("linkedin"));
+        assert!(!provider_supports_google_sso("discord"));
+        assert!(!provider_supports_google_sso("zoom"));
+        assert!(!provider_supports_google_sso("browserscan"));
+        assert!(!provider_supports_google_sso(""));
+        assert!(!provider_supports_google_sso("unknown-provider"));
     }
 
     #[test]
