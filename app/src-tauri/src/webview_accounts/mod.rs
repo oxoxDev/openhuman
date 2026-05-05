@@ -375,6 +375,27 @@ fn is_google_auth_popup(url: &Url) -> bool {
     })
 }
 
+/// `true` if a gmeet navigation lands on Google's Workspace marketing page
+/// for Meet — the host bounce that fires when an unauthenticated webview hits
+/// `meet.google.com`.
+///
+/// The `on_navigation` rewrite is scoped to this exact path family so we
+/// don't hijack legitimate `workspace.google.com` pages a user might reach
+/// from inside Meet (admin console links, Workspace Status, support pages,
+/// etc.). Matches `workspace.google.com` (and any subdomain) AND a path
+/// starting with `/products/meet` — empirically the only path Google's
+/// edge bounces unauthenticated Meet GETs to (`/products/meet/` or
+/// `/products/meet/<sub>`).
+fn is_gmeet_marketing_redirect(host: &str, path: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let host_matches = host == "workspace.google.com" || host.ends_with(".workspace.google.com");
+    if !host_matches {
+        return false;
+    }
+    let p = path.to_ascii_lowercase();
+    p == "/products/meet" || p == "/products/meet/" || p.starts_with("/products/meet/")
+}
+
 fn redact_navigation_url(url: &Url) -> String {
     let mut safe = url.clone();
     safe.set_query(None);
@@ -728,6 +749,12 @@ impl WebviewAccountsState {
             g.clear();
         }
         if let Ok(mut g) = self.requested_bounds.lock() {
+            g.clear();
+        }
+        // Per-label gmeet rewrite counter must clear too — `label_for()`
+        // reuses the same label on reopen, so a stale saturated entry
+        // would jump a fresh open straight to the bail URL.
+        if let Ok(mut g) = self.gmeet_marketing_rewrites.lock() {
             g.clear();
         }
         self.inner
@@ -1698,7 +1725,7 @@ pub async fn webview_account_open<R: Runtime>(
                     });
                     return false;
                 }
-                if host == "workspace.google.com" || host.ends_with(".workspace.google.com") {
+                if is_gmeet_marketing_redirect(host, url.path()) {
                     let action = nav_app
                         .try_state::<WebviewAccountsState>()
                         .map(|s| s.track_gmeet_marketing_rewrite(&nav_label, Instant::now()))
@@ -2259,6 +2286,10 @@ pub async fn webview_account_close<R: Runtime>(
         .lock()
         .unwrap()
         .remove(&args.account_id);
+    // Drop any gmeet workspace-rewrite counter for this label — labels are
+    // reused on reopen, so a stale entry from a closed-mid-loop session
+    // would saturate the next fresh open's window.
+    state.clear_gmeet_marketing_rewrite(&label);
     log::info!("[webview-accounts] closed label={}", label);
     Ok(())
 }
@@ -2322,6 +2353,9 @@ pub async fn webview_account_purge<R: Runtime>(
         .lock()
         .unwrap()
         .remove(&args.account_id);
+    if let Some(label) = label_opt.as_ref() {
+        state.clear_gmeet_marketing_rewrite(label);
+    }
 
     let data_dir = data_directory_for(&app, &args.account_id)?;
     purge_data_dir_with_retry(&data_dir)
@@ -2795,6 +2829,13 @@ mod tests {
                 height: 600.0,
             },
         );
+        // Saturate the gmeet rewrite counter so we can assert it gets
+        // cleared by drain (otherwise the next reopen would inherit a
+        // stale entry — `label_for()` reuses the same label).
+        for _ in 0..=GMEET_REWRITE_MAX_ATTEMPTS {
+            let _ = state.track_gmeet_marketing_rewrite("acct_1", Instant::now());
+        }
+        assert!(!state.gmeet_marketing_rewrites.lock().unwrap().is_empty());
 
         let labels = state.drain_for_shutdown();
 
@@ -2809,6 +2850,10 @@ mod tests {
         assert!(state.inner.lock().unwrap().is_empty());
         assert!(state.loaded_accounts.lock().unwrap().is_empty());
         assert!(state.requested_bounds.lock().unwrap().is_empty());
+        assert!(
+            state.gmeet_marketing_rewrites.lock().unwrap().is_empty(),
+            "gmeet rewrite counter must clear on drain so reopens don't inherit stale entries"
+        );
 
         // Second call must be a safe no-op: nothing left to drain.
         let labels2 = state.drain_for_shutdown();
@@ -3434,6 +3479,73 @@ mod tests {
             state.track_gmeet_marketing_rewrite("acct_b", now),
             GmeetRewriteAction::Rewrite
         );
+    }
+
+    // ── is_gmeet_marketing_redirect ────────────────────────────────
+
+    #[test]
+    fn gmeet_marketing_match_canonical_paths() {
+        assert!(is_gmeet_marketing_redirect(
+            "workspace.google.com",
+            "/products/meet/"
+        ));
+        assert!(is_gmeet_marketing_redirect(
+            "workspace.google.com",
+            "/products/meet"
+        ));
+        assert!(is_gmeet_marketing_redirect(
+            "workspace.google.com",
+            "/products/meet/learn-more"
+        ));
+        assert!(is_gmeet_marketing_redirect(
+            "WORKSPACE.GOOGLE.COM",
+            "/PRODUCTS/MEET/"
+        ));
+    }
+
+    #[test]
+    fn gmeet_marketing_match_subdomain_workspace() {
+        assert!(is_gmeet_marketing_redirect(
+            "support.workspace.google.com",
+            "/products/meet/faq"
+        ));
+    }
+
+    #[test]
+    fn gmeet_marketing_rejects_other_workspace_paths() {
+        // Legitimate Workspace pages a user might reach from Meet must NOT
+        // be hijacked — admin console, Workspace Status, support, etc.
+        assert!(!is_gmeet_marketing_redirect("workspace.google.com", "/"));
+        assert!(!is_gmeet_marketing_redirect(
+            "workspace.google.com",
+            "/products/calendar/"
+        ));
+        assert!(!is_gmeet_marketing_redirect(
+            "admin.workspace.google.com",
+            "/ac/users"
+        ));
+        assert!(!is_gmeet_marketing_redirect(
+            "workspace.google.com",
+            "/status"
+        ));
+        assert!(!is_gmeet_marketing_redirect(
+            "workspace.google.com",
+            "/products/meeter"
+        ));
+    }
+
+    #[test]
+    fn gmeet_marketing_rejects_non_workspace_hosts() {
+        assert!(!is_gmeet_marketing_redirect(
+            "meet.google.com",
+            "/products/meet/"
+        ));
+        assert!(!is_gmeet_marketing_redirect("evil.com", "/products/meet/"));
+        // Phishing alike: workspace-google.com is NOT workspace.google.com
+        assert!(!is_gmeet_marketing_redirect(
+            "workspace-google.com",
+            "/products/meet/"
+        ));
     }
 
     #[test]
