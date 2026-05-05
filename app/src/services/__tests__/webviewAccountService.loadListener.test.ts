@@ -54,7 +54,11 @@ function seedAccount(): void {
   );
 }
 
-async function fireLoadEvent(payload: { state: string; url?: string }): Promise<void> {
+async function fireLoadEvent(payload: {
+  state: string;
+  trigger?: string;
+  url?: string;
+}): Promise<void> {
   const handler = listeners.get('webview-account:load');
   if (!handler) throw new Error('webview-account:load listener not attached');
   handler({ payload: { account_id: ACCOUNT_ID, url: '', ...payload } });
@@ -101,7 +105,7 @@ describe('webviewAccountService load listener', () => {
     await fireLoadEvent({ state: 'finished', url: 'https://web.telegram.org/' });
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('webview_account_reveal', {
-      args: { account_id: ACCOUNT_ID, bounds },
+      args: { account_id: ACCOUNT_ID, bounds, trigger: 'load' },
     });
     expect(store.getState().accounts.accounts[ACCOUNT_ID]?.status).toBe('open');
   });
@@ -119,7 +123,7 @@ describe('webviewAccountService load listener', () => {
     await fireLoadEvent({ state: 'finished', url: 'x' });
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('webview_account_reveal', {
-      args: { account_id: ACCOUNT_ID, bounds: resized },
+      args: { account_id: ACCOUNT_ID, bounds: resized, trigger: 'load' },
     });
   });
 
@@ -159,7 +163,7 @@ describe('webviewAccountService load listener', () => {
 
     await fireLoadEvent({ state: 'finished', url: 'https://web.telegram.org/' });
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('webview_account_reveal', {
-      args: { account_id: ACCOUNT_ID, bounds },
+      args: { account_id: ACCOUNT_ID, bounds, trigger: 'load' },
     });
     expect(store.getState().accounts.accounts[ACCOUNT_ID]?.status).toBe('open');
   });
@@ -185,7 +189,7 @@ describe('webviewAccountService load listener', () => {
     await fireLoadEvent({ state: 'reused', url: 'https://web.telegram.org/' });
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('webview_account_reveal', {
-      args: { account_id: ACCOUNT_ID, bounds },
+      args: { account_id: ACCOUNT_ID, bounds, trigger: 'load' },
     });
     expect(store.getState().accounts.accounts[ACCOUNT_ID]?.status).toBe('open');
   });
