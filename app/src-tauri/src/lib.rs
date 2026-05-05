@@ -76,6 +76,23 @@ fn overlay_parent_rpc_url() -> Option<String> {
     Some(trimmed.to_string())
 }
 
+#[tauri::command]
+fn process_diagnostics_list_owned() -> Vec<process_recovery::ProcessInfo> {
+    match process_recovery::enumerate_openhuman_processes() {
+        Ok(processes) => {
+            log::info!(
+                "[startup-recovery] diagnostics listed {} owned OpenHuman processes",
+                processes.len()
+            );
+            processes
+        }
+        Err(err) => {
+            log::warn!("[startup-recovery] diagnostics process enumeration failed: {err}");
+            Vec::new()
+        }
+    }
+}
+
 #[allow(dead_code)] // Overlay disabled in tauri.conf.json; helper kept for future re-enable.
 fn pin_overlay_bottom_right(window: &WebviewWindow<AppRuntime>) {
     let Ok(Some(monitor)) = window.current_monitor() else {
@@ -1596,6 +1613,7 @@ pub fn run() {
             core_rpc_url,
             core_rpc_token,
             overlay_parent_rpc_url,
+            process_diagnostics_list_owned,
             check_core_update,
             apply_core_update,
             check_app_update,

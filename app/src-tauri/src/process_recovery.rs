@@ -417,7 +417,7 @@ mod imp {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use imp::reap_stale_openhuman_processes;
+pub(crate) use imp::{enumerate_openhuman_processes, reap_stale_openhuman_processes, ProcessInfo};
 
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
