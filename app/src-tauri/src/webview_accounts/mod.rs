@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use std::sync::{mpsc::sync_channel, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -552,9 +552,62 @@ pub struct WebviewAccountsState {
     requested_bounds: Mutex<HashMap<String, Bounds>>,
     /// Runtime notification-bypass controls used by the settings UI.
     notification_bypass: Mutex<NotificationBypassPrefs>,
+    /// Per-label rewrite counter for the gmeet `workspace.google.com`
+    /// marketing intercept. Google's edge SSR-redirects unauthenticated
+    /// `meet.google.com` GETs back to `workspace.google.com/products/meet/`,
+    /// so an unguarded rewrite (see `:1534-1559`) ping-pongs forever and
+    /// the page never lands. We track `(last_attempt, attempts_in_window)`
+    /// per webview label and bail to the Google sign-in flow after a
+    /// threshold so the user breaks out of the loop.
+    gmeet_marketing_rewrites: Mutex<HashMap<String, (Instant, u32)>>,
+}
+
+/// Threshold and window for the gmeet workspace-marketing rewrite loop
+/// breaker. After `GMEET_REWRITE_MAX_ATTEMPTS` rewrites within
+/// `GMEET_REWRITE_WINDOW`, we bail to the Google sign-in URL instead of
+/// rewriting again.
+pub(crate) const GMEET_REWRITE_MAX_ATTEMPTS: u32 = 3;
+pub(crate) const GMEET_REWRITE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Result of consulting the gmeet marketing-redirect counter.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GmeetRewriteAction {
+    /// Allow the rewrite — fewer than `GMEET_REWRITE_MAX_ATTEMPTS` attempts in
+    /// the current window.
+    Rewrite,
+    /// Loop detected — caller should navigate to the Google sign-in URL
+    /// instead of rewriting back to `meet.google.com`.
+    Bail,
 }
 
 impl WebviewAccountsState {
+    /// Increment the per-label gmeet marketing-rewrite counter for `now` and
+    /// decide whether to rewrite or bail. Resets the counter when the last
+    /// attempt was outside `GMEET_REWRITE_WINDOW` so a future genuine
+    /// `workspace.google.com` navigation (e.g. user clicks a link inside Meet
+    /// after sign-in) gets intercepted normally.
+    pub(crate) fn track_gmeet_marketing_rewrite(
+        &self,
+        label: &str,
+        now: Instant,
+    ) -> GmeetRewriteAction {
+        let mut map = match self.gmeet_marketing_rewrites.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let entry = map.entry(label.to_string()).or_insert((now, 0));
+        if now.duration_since(entry.0) > GMEET_REWRITE_WINDOW {
+            *entry = (now, 0);
+        }
+        entry.1 += 1;
+        entry.0 = now;
+        if entry.1 > GMEET_REWRITE_MAX_ATTEMPTS {
+            GmeetRewriteAction::Bail
+        } else {
+            GmeetRewriteAction::Rewrite
+        }
+    }
+
     /// Drain every per-account resource owned by this state and abort the
     /// associated background tasks. Returns the `(account_id, label)`
     /// pairs of webviews that still need closing — the caller does the
@@ -1531,22 +1584,50 @@ pub async fn webview_account_open<R: Runtime>(
         // would land on the Workspace marketing page instead of Meet.
         // Catch this here and replace the parent URL with the canonical
         // Meet entry point so the embedded view stays on the app.
+        //
+        // BUT: unauthenticated users get bounced right back to
+        // `workspace.google.com/products/meet/` by Google's edge, so an
+        // unguarded rewrite ping-pongs forever (`navigate` → Google
+        // redirect → `on_navigation` → `navigate` → …). We track per-label
+        // attempts in `WebviewAccountsState::gmeet_marketing_rewrites` and
+        // bail to a Google sign-in URL after a small threshold so the user
+        // can break out of the loop. See #1213 (downstream watchdog
+        // symptom) and `track_gmeet_marketing_rewrite` for the policy.
         if nav_provider == "google-meet" {
             if let Some(host) = url.host_str() {
                 if host == "workspace.google.com" || host.ends_with(".workspace.google.com") {
-                    log::info!(
-                        "[webview-accounts] gmeet workspace marketing redirect intercepted ({}); rewriting parent to https://meet.google.com/",
-                        url
-                    );
+                    let action = nav_app
+                        .try_state::<WebviewAccountsState>()
+                        .map(|s| s.track_gmeet_marketing_rewrite(&nav_label, Instant::now()))
+                        .unwrap_or(GmeetRewriteAction::Rewrite);
                     let app = nav_app.clone();
                     let label = nav_label.clone();
+                    let target_url = match action {
+                        GmeetRewriteAction::Rewrite => {
+                            log::info!(
+                                "[webview-accounts] gmeet workspace marketing redirect intercepted ({}); rewriting parent to https://meet.google.com/",
+                                url
+                            );
+                            "https://meet.google.com/"
+                        }
+                        GmeetRewriteAction::Bail => {
+                            log::warn!(
+                                "[webview-accounts] gmeet workspace rewrite loop detected on label={} (>{} attempts in {}s); falling through to Google sign-in",
+                                nav_label,
+                                GMEET_REWRITE_MAX_ATTEMPTS,
+                                GMEET_REWRITE_WINDOW.as_secs()
+                            );
+                            "https://accounts.google.com/ServiceLogin?service=meet&continue=https://meet.google.com/"
+                        }
+                    };
                     tauri::async_runtime::spawn(async move {
                         if let Some(wv) = app.get_webview(&label) {
-                            if let Ok(target) = Url::parse("https://meet.google.com/") {
+                            if let Ok(target) = Url::parse(target_url) {
                                 if let Err(e) = wv.navigate(target) {
                                     log::warn!(
-                                        "[webview-accounts] gmeet workspace rewrite navigate failed label={} err={}",
+                                        "[webview-accounts] gmeet workspace rewrite navigate failed label={} target={} err={}",
                                         label,
+                                        target_url,
                                         e
                                     );
                                 }
@@ -3105,5 +3186,69 @@ mod tests {
             .expect("existing dir should be removed");
 
         assert!(!dir.exists(), "data dir should be removed");
+    }
+
+    // ── track_gmeet_marketing_rewrite ──────────────────────────────
+
+    #[test]
+    fn gmeet_rewrite_allowed_under_threshold() {
+        let state = WebviewAccountsState::default();
+        let label = "acct_test";
+        let now = Instant::now();
+        for i in 1..=GMEET_REWRITE_MAX_ATTEMPTS {
+            assert_eq!(
+                state.track_gmeet_marketing_rewrite(label, now),
+                GmeetRewriteAction::Rewrite,
+                "attempt {} should still rewrite",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn gmeet_rewrite_bails_after_threshold() {
+        let state = WebviewAccountsState::default();
+        let label = "acct_test";
+        let now = Instant::now();
+        for _ in 0..GMEET_REWRITE_MAX_ATTEMPTS {
+            let _ = state.track_gmeet_marketing_rewrite(label, now);
+        }
+        // Next call exceeds the threshold within the window — must bail.
+        assert_eq!(
+            state.track_gmeet_marketing_rewrite(label, now),
+            GmeetRewriteAction::Bail
+        );
+    }
+
+    #[test]
+    fn gmeet_rewrite_resets_after_window() {
+        let state = WebviewAccountsState::default();
+        let label = "acct_test";
+        let start = Instant::now();
+        // Saturate the counter at start.
+        for _ in 0..=GMEET_REWRITE_MAX_ATTEMPTS {
+            let _ = state.track_gmeet_marketing_rewrite(label, start);
+        }
+        // After the window expires, a fresh attempt must rewrite again.
+        let later = start + GMEET_REWRITE_WINDOW + Duration::from_secs(1);
+        assert_eq!(
+            state.track_gmeet_marketing_rewrite(label, later),
+            GmeetRewriteAction::Rewrite
+        );
+    }
+
+    #[test]
+    fn gmeet_rewrite_per_label_independent() {
+        let state = WebviewAccountsState::default();
+        let now = Instant::now();
+        // Saturate label A — bails next time.
+        for _ in 0..=GMEET_REWRITE_MAX_ATTEMPTS {
+            let _ = state.track_gmeet_marketing_rewrite("acct_a", now);
+        }
+        // Label B must still be allowed independently.
+        assert_eq!(
+            state.track_gmeet_marketing_rewrite("acct_b", now),
+            GmeetRewriteAction::Rewrite
+        );
     }
 }
