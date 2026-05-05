@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
-import { isWelcomeLocked } from '../lib/coreState/store';
+// [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
+// import { isWelcomeLocked } from '../lib/coreState/store';
 import { useCoreState } from '../providers/CoreStateProvider';
 import { useAppSelector } from '../store/hooks';
 import { selectUnreadCount } from '../store/notificationSlice';
@@ -68,22 +69,6 @@ const tabs = [
           strokeLinejoin="round"
           strokeWidth={1.8}
           d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5"
-        />
-      </svg>
-    ),
-  },
-  // Memory tab hidden until Intelligence feature is ready (#976)
-  {
-    id: 'intelligence',
-    label: 'Memory',
-    path: '/intelligence',
-    icon: (
-      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={1.8}
-          d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
         />
       </svg>
     ),
@@ -159,12 +144,13 @@ const BottomTabBar = () => {
     return null;
   }
 
+  // [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
   // Welcome lockdown (#883) — hide the bottom nav entirely while the
   // chat-based welcome-agent flow is still in progress so the user
   // cannot navigate away from the welcome conversation.
-  if (isWelcomeLocked(snapshot)) {
-    return null;
-  }
+  // if (isWelcomeLocked(snapshot)) {
+  //   return null;
+  // }
 
   // On /accounts we want as much real estate as possible for the embedded
   // webview — but *only* when a real account (WhatsApp, …) is selected.
@@ -215,9 +201,18 @@ const BottomTabBar = () => {
             .map(tab => {
               const active = isActive(tab.path);
               const showBadge = tab.id === 'notifications' && unreadCount > 0;
+              // data-walkthrough attributes for the Joyride walkthrough steps.
+              // Maps tab ids to their walkthrough target names.
+              const walkthroughAttr: Record<string, string> = {
+                chat: 'tab-chat',
+                skills: 'tab-skills',
+                notifications: 'tab-notifications',
+                settings: 'tab-settings',
+              };
               return (
                 <button
                   key={tab.id}
+                  data-walkthrough={walkthroughAttr[tab.id]}
                   onClick={() => navigate(tab.path)}
                   className={`group relative flex items-center px-2 py-2 rounded-sm text-sm transition-colors duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] cursor-pointer ${
                     active

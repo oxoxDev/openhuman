@@ -77,11 +77,7 @@ pub async fn composio_list_connections(
         .list_connections()
         .await
         .map_err(|e| format!("[composio] list_connections failed: {e:#}"))?;
-    let active = resp
-        .connections
-        .iter()
-        .filter(|c| matches!(c.status.as_str(), "ACTIVE" | "CONNECTED"))
-        .count();
+    let active = resp.connections.iter().filter(|c| c.is_active()).count();
     let total = resp.connections.len();
     // Reconcile the chat-runtime integrations cache against this fresh
     // snapshot. The desktop UI polls this RPC every 5 s, so any OAuth
@@ -342,10 +338,12 @@ pub async fn composio_disable_trigger(
         .disable_trigger(trigger_id)
         .await
         .map_err(|e| format!("[composio] disable_trigger failed: {e:#}"))?;
-    Ok(RpcOutcome::new(
-        resp,
-        vec![format!("composio: disabled trigger {trigger_id}")],
-    ))
+    let message = if resp.deleted {
+        format!("composio: disabled trigger {trigger_id}")
+    } else {
+        format!("composio: trigger {trigger_id} was not active")
+    };
+    Ok(RpcOutcome::new(resp, vec![message]))
 }
 
 // ── Trigger history ────────────────────────────────────────────────
@@ -613,8 +611,9 @@ fn connected_toolkit_set(integrations: &[ConnectedIntegration]) -> HashSet<Strin
 fn sync_cache_with_connections(connections: &[super::types::ComposioConnection]) {
     let live_active: HashSet<String> = connections
         .iter()
-        .filter(|c| matches!(c.status.as_str(), "ACTIVE" | "CONNECTED"))
-        .map(|c| c.toolkit.clone())
+        .filter(|c| c.is_active())
+        .map(|c| c.normalized_toolkit())
+        .filter(|toolkit| !toolkit.is_empty())
         .collect();
 
     // Read once to decide whether any cache entry is out of sync. We
@@ -680,6 +679,43 @@ fn sync_cache_with_connections(connections: &[super::types::ComposioConnection])
 /// Best-effort: returns an empty vec when the user isn't signed in,
 /// the backend is unreachable, or any step fails.
 pub async fn fetch_connected_integrations(config: &Config) -> Vec<ConnectedIntegration> {
+    match fetch_connected_integrations_status(config).await {
+        FetchConnectedIntegrationsStatus::Authoritative(v) => v,
+        FetchConnectedIntegrationsStatus::Unavailable => Vec::new(),
+    }
+}
+
+/// Discriminated outcome from [`fetch_connected_integrations_status`].
+///
+/// Lets callers distinguish "the backend confirmed the user has zero
+/// active connections right now" from "we couldn't talk to the backend
+/// (no client, transient failure, …) and have no truth to report".
+///
+/// The legacy [`fetch_connected_integrations`] collapses both into an
+/// empty `Vec`, which is fine for prompt-building (they look the same)
+/// but dangerous for spawn-time allowlist gates — using empty as truth
+/// in the unavailable case would silently wipe the user's allowlist
+/// during a transient 5xx.
+#[derive(Debug, Clone)]
+pub enum FetchConnectedIntegrationsStatus {
+    /// Backend was reachable. Vec may legitimately be empty (no
+    /// allowlisted toolkits, or no active connections).
+    Authoritative(Vec<ConnectedIntegration>),
+    /// Backend wasn't reachable (no auth client, transient error). The
+    /// caller should fall back to its prior snapshot rather than treat
+    /// "no connections" as truth.
+    Unavailable,
+}
+
+/// Status-returning variant of [`fetch_connected_integrations`].
+///
+/// Same caching, same cache-invalidation semantics — only the return
+/// shape differs. Cache hits are by definition `Authoritative` because
+/// we only cache the `Some(...)` arm of `_uncached` (i.e. results the
+/// backend confirmed).
+pub async fn fetch_connected_integrations_status(
+    config: &Config,
+) -> FetchConnectedIntegrationsStatus {
     let key = cache_key(config);
 
     // Fast path: return cached result if fresh. Stale entries fall
@@ -695,7 +731,7 @@ pub async fn fetch_connected_integrations(config: &Config) -> Vec<ConnectedInteg
                     key = %key,
                     "[composio][integrations] returning cached result"
                 );
-                return cached.entries.clone();
+                return FetchConnectedIntegrationsStatus::Authoritative(cached.entries.clone());
             }
             tracing::info!(
                 count = cached.entries.len(),
@@ -719,12 +755,12 @@ pub async fn fetch_connected_integrations(config: &Config) -> Vec<ConnectedInteg
                     },
                 );
             }
-            result
+            FetchConnectedIntegrationsStatus::Authoritative(result)
         }
         None => {
             // No auth / client unavailable — do NOT cache so a
             // subsequent call with a different config can retry.
-            Vec::new()
+            FetchConnectedIntegrationsStatus::Unavailable
         }
     }
 }
@@ -763,7 +799,12 @@ async fn fetch_connected_integrations_uncached(
     // during startup would silently break delegation for the whole
     // session.
     let allowlisted_toolkits: Vec<String> = match client.list_toolkits().await {
-        Ok(resp) => resp.toolkits,
+        Ok(resp) => resp
+            .toolkits
+            .into_iter()
+            .map(|toolkit| toolkit.trim().to_ascii_lowercase())
+            .filter(|toolkit| !toolkit.is_empty())
+            .collect(),
         Err(e) => {
             tracing::warn!("[composio] fetch_connected_integrations: list_toolkits failed: {e}");
             return None;
@@ -790,8 +831,9 @@ async fn fetch_connected_integrations_uncached(
     // Active connection slugs (status filter mirrors the original logic).
     let connected_slugs: std::collections::HashSet<String> = connections
         .iter()
-        .filter(|c| c.status == "ACTIVE" || c.status == "CONNECTED")
-        .map(|c| c.toolkit.clone())
+        .filter(|c| c.is_active())
+        .map(|c| c.normalized_toolkit())
+        .filter(|toolkit| !toolkit.is_empty())
         .collect();
 
     // Fetch available tool schemas — only for the connected slugs,

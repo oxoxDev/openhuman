@@ -125,13 +125,16 @@ async fn invoke_method_inner(
 ) -> Result<Value, String> {
     // Phase 1: Check static controller registry.
     if let Some(schema) = all::schema_for_rpc_method(method) {
-        let params_obj = params_to_object(params)?;
+        let params_obj = params_to_object(params.clone())?;
         // Validate inputs against the schema before calling the handler.
         all::validate_params(&schema, &params_obj)?;
         if let Some(result) = all::try_invoke_registered_rpc(method, params_obj).await {
             return result;
         }
-        return Err(format!("registered schema has no handler: {method}"));
+        log::debug!(
+            "[jsonrpc] schema matched without registered handler; falling back method={}",
+            method
+        );
     }
 
     // Phase 2: Fall back to dynamic dispatch (internal core methods or legacy paths).
@@ -624,6 +627,40 @@ async fn run_server_inner(
     });
     crate::core::auth::init_rpc_token(&token_dir)?;
 
+    // Initialize the global MemoryClient so composio providers
+    // (gmail/slack/notion) can persist their sync_state via kv_get/kv_set,
+    // and so any subsystem that calls `memory::global::client_if_ready()`
+    // gets a live handle. Without this, every periodic sync bails with
+    // "[composio:gmail] memory client not ready".
+    {
+        // Surface a config-load failure explicitly. Falling silently to
+        // `Config::default()` would hide a serious operator-visible
+        // problem (corrupt toml, permissions, missing OPENHUMAN_WORKSPACE
+        // workspace dir) and the memory client would init against the
+        // wrong workspace — leading to chunk loss / cross-workspace
+        // bleed-over. We log loud, then proceed with default so the
+        // server still comes up; the operator sees the error in stderr
+        // and can fix their config.
+        let cfg = match crate::openhuman::config::Config::load_or_init().await {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!(
+                    "[boot] memory::global init: Config::load_or_init failed ({e:#}); \
+                     falling back to default workspace dir — fix your config.toml \
+                     or OPENHUMAN_WORKSPACE before relying on memory persistence"
+                );
+                Default::default()
+            }
+        };
+        match crate::openhuman::memory::global::init(cfg.workspace_dir.clone()) {
+            Ok(_) => log::info!(
+                "[boot] memory::global initialized (workspace={})",
+                cfg.workspace_dir.display()
+            ),
+            Err(e) => log::warn!("[boot] memory::global init failed: {e}"),
+        }
+    }
+
     let (resolved_port, port_source) = match port {
         Some(p) => (p, "CLI --port"),
         None => (
@@ -868,6 +905,9 @@ fn register_domain_subscribers(
         // Restart requests go through a subscriber so every trigger path shares
         // the same respawn logic.
         crate::openhuman::service::bus::register_restart_subscriber();
+        // Shutdown requests use the same pattern; the subscriber exits the
+        // current process after a short grace period.
+        crate::openhuman::service::bus::register_shutdown_subscriber();
 
         // Proactive message subscriber (web-only in the desktop runtime —
         // no external channel instances are registered here). Uses a
@@ -905,6 +945,27 @@ pub async fn bootstrap_skill_runtime() {
     // Uses a Once guard so repeated calls to bootstrap_skill_runtime()
     // cannot double-subscribe.
     register_domain_subscribers(workspace_dir.clone(), cfg.clone());
+
+    // --- Turn-state recovery -------------------------------------------
+    // Any per-thread turn snapshots left on disk from a previous process
+    // are stale by definition — there is no live driver to resume them.
+    // Stamp them as `Interrupted` so the UI can offer a retry without
+    // confusing a stale `Streaming` lifecycle for an in-flight turn.
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        match crate::openhuman::threads::turn_state::store::mark_all_interrupted(
+            workspace_dir.clone(),
+            &now,
+        ) {
+            Ok(0) => {}
+            Ok(count) => {
+                log::info!("[runtime] marked {count} stale turn snapshot(s) as interrupted")
+            }
+            Err(err) => {
+                log::warn!("[runtime] failed to mark stale turn snapshots interrupted: {err}")
+            }
+        }
+    }
 
     // --- Sub-agent definition registry bootstrap ---
     // Loads built-in archetype definitions plus any custom TOML files
@@ -1022,47 +1083,17 @@ struct HttpMethodSchema {
 ///
 /// Also includes built-in core methods like `core.ping` and `core.version`.
 fn build_http_schema_dump() -> HttpSchemaDump {
-    let mut methods = vec![
-        HttpMethodSchema {
-            method: "core.ping".to_string(),
-            namespace: "core".to_string(),
-            function: "ping".to_string(),
-            description: "Liveness probe for the core JSON-RPC server.".to_string(),
-            inputs: vec![],
-            outputs: vec![crate::core::FieldSchema {
-                name: "ok",
-                ty: crate::core::TypeSchema::Bool,
-                comment: "Always true when the server is reachable.",
-                required: true,
-            }],
-        },
-        HttpMethodSchema {
-            method: "core.version".to_string(),
-            namespace: "core".to_string(),
-            function: "version".to_string(),
-            description: "Returns the core binary version.".to_string(),
-            inputs: vec![],
-            outputs: vec![crate::core::FieldSchema {
-                name: "version",
-                ty: crate::core::TypeSchema::String,
-                comment: "Semantic version string for the running core binary.",
-                required: true,
-            }],
-        },
-    ];
-
-    methods.extend(
-        all::all_controller_schemas()
-            .into_iter()
-            .map(|schema| HttpMethodSchema {
-                method: all::rpc_method_name(&schema),
-                namespace: schema.namespace.to_string(),
-                function: schema.function.to_string(),
-                description: schema.description.to_string(),
-                inputs: schema.inputs,
-                outputs: schema.outputs,
-            }),
-    );
+    let mut methods: Vec<HttpMethodSchema> = all::all_http_method_schemas()
+        .into_iter()
+        .map(|method| HttpMethodSchema {
+            method: method.method,
+            namespace: method.namespace.to_string(),
+            function: method.function.to_string(),
+            description: method.description.to_string(),
+            inputs: method.inputs,
+            outputs: method.outputs,
+        })
+        .collect();
 
     // Sort methods alphabetically for consistent output.
     methods.sort_by(|a, b| a.method.cmp(&b.method));

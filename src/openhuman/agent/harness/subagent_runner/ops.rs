@@ -34,6 +34,7 @@ use crate::openhuman::agent::progress::AgentProgress;
 use crate::openhuman::context::prompt::{
     render_subagent_system_prompt, PromptContext, PromptTool, SubagentRenderOptions,
 };
+use crate::openhuman::memory::conversations::ConversationMessage;
 use crate::openhuman::providers::{ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::openhuman::tools::{Tool, ToolCategory, ToolSpec};
 
@@ -154,6 +155,75 @@ async fn run_typed_mode(
     // `load_prompt_source(...)` call lives just above
     // `render_subagent_system_prompt` below.
 
+    // ── Refresh connected-integrations at spawn time ───────────────────
+    //
+    // The parent session's `connected_integrations` Vec is frozen at
+    // session-start (see `session/turn.rs::fetch_connected_integrations`,
+    // which only runs while `history.is_empty()` to preserve the
+    // KV-cache prefix). That means a toolkit the user authorised mid-
+    // thread — e.g. Calendly — is missing from `parent.connected_integrations`,
+    // and the spawn-time toolkit lookup further down rejects it as
+    // "not allowlisted / not connected" until the user starts a new
+    // thread or restarts the app.
+    //
+    // Re-fetch from the global integrations cache here. The cache is
+    // invalidated by `ComposioConnectionCreatedSubscriber` once the
+    // OAuth handshake reaches ACTIVE/CONNECTED, so this call returns
+    // the fresh list almost for free on the warm path. Fall back to
+    // the parent's frozen list when the live fetch returns empty (no
+    // signed-in user, backend unreachable, …) so offline / not-signed-
+    // in behaviour is unchanged.
+    let live_integrations: Vec<crate::openhuman::context::prompt::ConnectedIntegration> = {
+        if parent.composio_client.is_none() {
+            parent.connected_integrations.clone()
+        } else {
+            match crate::openhuman::config::Config::load_or_init().await {
+                Ok(config) => {
+                    use crate::openhuman::composio::FetchConnectedIntegrationsStatus;
+                    // `fetch_connected_integrations_status` distinguishes
+                    // an authoritative empty list (user disconnected
+                    // their last integration mid-thread) from
+                    // backend-unavailable (no client / transient error).
+                    // Adopt the authoritative case as truth — even when
+                    // empty — so a revoked toolkit really disappears
+                    // from the spawn pre-flight; only fall back to the
+                    // parent's frozen list when the backend explicitly
+                    // can't answer.
+                    match crate::openhuman::composio::fetch_connected_integrations_status(&config)
+                        .await
+                    {
+                        FetchConnectedIntegrationsStatus::Authoritative(fresh) => {
+                            tracing::debug!(
+                                count = fresh.len(),
+                                parent_count = parent.connected_integrations.len(),
+                                "[subagent_runner] refreshed connected_integrations at spawn time"
+                            );
+                            fresh
+                        }
+                        FetchConnectedIntegrationsStatus::Unavailable => {
+                            tracing::debug!(
+                                "[subagent_runner] integrations backend unavailable; falling back to parent's frozen list"
+                            );
+                            parent.connected_integrations.clone()
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Real failure — config couldn't be read, so the
+                    // backend client can't be built either. Use the
+                    // parent's frozen list as a best-effort fallback so
+                    // the spawn can still proceed for sessions that
+                    // were established when config was healthy.
+                    tracing::debug!(
+                        error = %e,
+                        "[subagent_runner] config load failed; falling back to parent's frozen integrations list"
+                    );
+                    parent.connected_integrations.clone()
+                }
+            }
+        }
+    };
+
     // ── Filter tools per definition + per-spawn override ───────────────
     let toolkit_filter = options.toolkit_override.as_deref();
     let mut allowed_indices = filter_tool_indices(
@@ -185,7 +255,10 @@ async fn run_typed_mode(
     // should not list these tools either, but we enforce it here so a
     // misconfigured TOML can't bypass the rule.
     let before = allowed_indices.len();
-    allowed_indices.retain(|&i| !is_subagent_spawn_tool(parent.all_tools[i].name()));
+    allowed_indices.retain(|&i| {
+        let name = parent.all_tools[i].name();
+        !is_subagent_spawn_tool(name) && name != "spawn_worker_thread"
+    });
     let stripped = before - allowed_indices.len();
     if stripped > 0 {
         tracing::debug!(
@@ -268,9 +341,12 @@ async fn run_typed_mode(
             // The spawn_subagent pre-flight already verified the
             // toolkit is in the allowlist AND has an active
             // connection, so the matching entry must be present and
-            // marked connected. Defensive lookup anyway.
-            if let Some(cached_integration) = parent
-                .connected_integrations
+            // marked connected. Defensive lookup anyway. Reads from
+            // `live_integrations` (refreshed above) rather than the
+            // session-frozen `parent.connected_integrations` so a
+            // mid-thread `composio_authorize` is visible without a
+            // new thread / restart.
+            if let Some(cached_integration) = live_integrations
                 .iter()
                 .find(|ci| ci.connected && ci.toolkit.eq_ignore_ascii_case(tk))
             {
@@ -504,14 +580,12 @@ async fn run_typed_mode(
     // a sub-agent that's actually executing work.
     let narrowed_integrations: Vec<crate::openhuman::context::prompt::ConnectedIntegration> =
         match toolkit_filter {
-            Some(tk) => parent
-                .connected_integrations
+            Some(tk) => live_integrations
                 .iter()
                 .filter(|ci| ci.connected && ci.toolkit.eq_ignore_ascii_case(tk))
                 .cloned()
                 .collect(),
-            None => parent
-                .connected_integrations
+            None => live_integrations
                 .iter()
                 .filter(|ci| ci.connected)
                 .cloned()
@@ -581,6 +655,7 @@ async fn run_typed_mode(
         connected_identities_md: crate::openhuman::agent::prompts::render_connected_identities(),
         include_profile: !definition.omit_profile,
         include_memory_md: !definition.omit_memory_md,
+        curated_snapshot: None,
         user_identity: crate::openhuman::app_state::peek_cached_current_user_identity(),
     };
 
@@ -664,6 +739,7 @@ async fn run_typed_mode(
         definition.max_iterations,
         task_id,
         &definition.id,
+        options.worker_thread_id.clone(),
         handoff_cache.as_deref(),
         parent,
     )
@@ -743,7 +819,7 @@ async fn run_fork_mode(
         .all_tools
         .iter()
         .map(|t| t.name().to_string())
-        .filter(|name| !is_subagent_spawn_tool(name))
+        .filter(|name| !is_subagent_spawn_tool(name) && name != "spawn_worker_thread")
         .collect();
 
     let model = parent.model_name.clone();
@@ -769,6 +845,7 @@ async fn run_fork_mode(
         max_iterations,
         task_id,
         &definition.id,
+        None,
         None,
         parent,
     )
@@ -821,6 +898,7 @@ async fn run_inner_loop(
     max_iterations: usize,
     task_id: &str,
     agent_id: &str,
+    worker_thread_id: Option<String>,
     handoff_cache: Option<&ResultHandoffCache>,
     parent: &ParentExecutionContext,
 ) -> Result<(String, usize, AggregatedUsage), SubagentRunError> {
@@ -970,6 +1048,32 @@ async fn run_inner_loop(
         }
     };
 
+    let append_worker_message =
+        |content: String, sender: String, extra_metadata: serde_json::Value| {
+            if let Some(ref thread_id) = worker_thread_id {
+                let message = ConversationMessage {
+                    id: format!("{}:{}", sender, uuid::Uuid::new_v4()),
+                    content,
+                    message_type: "text".to_string(),
+                    extra_metadata,
+                    sender,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Err(err) = crate::openhuman::memory::conversations::append_message(
+                    parent.workspace_dir.clone(),
+                    thread_id,
+                    message,
+                ) {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        thread_id = %thread_id,
+                        error = %err,
+                        "[subagent_runner] failed to append message to worker thread"
+                    );
+                }
+            }
+        };
+
     // Per-turn progress sink shared with the parent — `None` for runs
     // that don't have a subscriber (CLI / triage / tests). Cloned upfront
     // so the inner loop body doesn't repeatedly re-resolve `parent.on_progress`.
@@ -1056,6 +1160,17 @@ async fn run_inner_loop(
                 "[subagent_runner] no tool calls — returning final response"
             );
             history.push(ChatMessage::assistant(response_text.clone()));
+            append_worker_message(
+                response_text.clone(),
+                "agent".to_string(),
+                serde_json::json!({
+                    "scope": "worker_thread",
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "iteration": iteration + 1,
+                    "final": true,
+                }),
+            );
             // Persist the final response before returning so the
             // transcript always captures the last provider reply.
             persist_transcript(history, &usage);
@@ -1075,6 +1190,18 @@ async fn run_inner_loop(
                 super::super::parse::build_native_assistant_history(&response_text, &native_calls);
             history.push(ChatMessage::assistant(assistant_history_content));
         }
+
+        append_worker_message(
+            response_text.clone(),
+            "agent".to_string(),
+            serde_json::json!({
+                "scope": "worker_thread",
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "iteration": iteration + 1,
+                "tool_calls": native_calls.len(),
+            }),
+        );
 
         // Persist the assistant response + tool-call intents **before**
         // executing tools. If the session crashes mid-tool-call we
@@ -1239,9 +1366,21 @@ async fn run_inner_loop(
             } else {
                 let tool_msg = serde_json::json!({
                     "tool_call_id": call.id,
-                    "content": result_text,
+                    "content": result_text.clone(),
                 });
                 history.push(ChatMessage::tool(tool_msg.to_string()));
+                append_worker_message(
+                    result_text.clone(),
+                    "user".to_string(),
+                    serde_json::json!({
+                        "scope": "worker_thread",
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "iteration": iteration + 1,
+                        "tool_call_id": call.id,
+                        "tool_name": call.name,
+                    }),
+                );
             }
 
             if let Some(ref tx) = progress_sink {
@@ -1261,9 +1400,19 @@ async fn run_inner_loop(
         }
 
         if force_text_mode && !text_mode_result_block.is_empty() {
-            history.push(ChatMessage::user(format!(
-                "[Tool results]\n{text_mode_result_block}"
-            )));
+            let content = format!("[Tool results]\n{text_mode_result_block}");
+            history.push(ChatMessage::user(content.clone()));
+            append_worker_message(
+                content,
+                "user".to_string(),
+                serde_json::json!({
+                    "scope": "worker_thread",
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "iteration": iteration + 1,
+                    "mode": "text",
+                }),
+            );
         }
 
         // Persist again after tool results have been appended so the

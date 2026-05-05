@@ -17,9 +17,13 @@ use crate::openhuman::memory::{
 };
 use crate::openhuman::providers::{self, ProviderRuntimeOptions};
 use crate::openhuman::threads::title::{
-    build_title_prompt, collapse_whitespace, is_auto_generated_thread_title,
-    sanitize_generated_title, title_log_fingerprint, THREAD_TITLE_LOG_PREFIX,
+    build_title_prompt, is_auto_generated_thread_title, sanitize_generated_title,
+    title_from_user_message, title_log_fingerprint, THREAD_TITLE_LOG_PREFIX,
     THREAD_TITLE_MODEL_HINT, THREAD_TITLE_SYSTEM_PROMPT,
+};
+use crate::openhuman::threads::turn_state::{
+    self, ClearTurnStateRequest, ClearTurnStateResponse, GetTurnStateRequest, GetTurnStateResponse,
+    ListTurnStatesResponse,
 };
 use crate::rpc::RpcOutcome;
 use serde::Serialize;
@@ -74,6 +78,7 @@ fn thread_to_summary(thread: ConversationThread) -> ConversationThreadSummary {
         message_count: thread.message_count,
         last_message_at: thread.last_message_at,
         created_at: thread.created_at,
+        parent_thread_id: thread.parent_thread_id,
         labels: thread.labels,
     }
 }
@@ -98,6 +103,38 @@ fn record_to_message(record: ConversationMessageRecord) -> ConversationMessage {
         sender: record.sender,
         created_at: record.created_at,
     }
+}
+
+fn fallback_title_from_user_message(thread_id: &str, user_message: &str) -> Option<String> {
+    let title = title_from_user_message(user_message);
+    if let Some(title) = &title {
+        tracing::debug!(
+            thread_id = %thread_id,
+            title_len = title.chars().count(),
+            title_hash = %title_log_fingerprint(title),
+            "{THREAD_TITLE_LOG_PREFIX} derived fallback title from user message"
+        );
+    } else {
+        tracing::debug!(
+            thread_id = %thread_id,
+            "{THREAD_TITLE_LOG_PREFIX} user message did not yield fallback title"
+        );
+    }
+    title
+}
+
+fn update_thread_with_fallback_title(
+    dir: PathBuf,
+    thread: ConversationThread,
+    user_message: &str,
+) -> Result<ConversationThread, String> {
+    let Some(title) = fallback_title_from_user_message(&thread.id, user_message) else {
+        return Ok(thread);
+    };
+    if title == thread.title {
+        return Ok(thread);
+    }
+    conversations::update_thread_title(dir, &thread.id, &title, &chrono::Utc::now().to_rfc3339())
 }
 
 /// Lists all conversation threads.
@@ -128,6 +165,7 @@ pub async fn thread_upsert(
             id: request.id,
             title: request.title,
             created_at: request.created_at,
+            parent_thread_id: request.parent_thread_id,
             labels: request.labels,
         },
     )?;
@@ -153,6 +191,7 @@ pub async fn thread_create_new(
             id,
             title,
             created_at,
+            parent_thread_id: None,
             // Pass labels through as-is; the store's infer_labels() applies
             // the same default on index rebuild, so this is the single source
             // of truth for default labels.
@@ -264,10 +303,11 @@ pub async fn thread_generate_title(
     let Some(assistant_message) = assistant_message else {
         tracing::debug!(
             thread_id = %request.thread_id,
-            "{THREAD_TITLE_LOG_PREFIX} no assistant message yet; skipping"
+            "{THREAD_TITLE_LOG_PREFIX} no assistant message yet; applying fallback title"
         );
+        let updated = update_thread_with_fallback_title(dir, thread, &first_user_message)?;
         return Ok(envelope(
-            thread_to_summary(thread),
+            thread_to_summary(updated),
             Some(counts([("num_threads", 1)])),
             None,
         ));
@@ -291,10 +331,11 @@ pub async fn thread_generate_title(
             tracing::warn!(
                 thread_id = %request.thread_id,
                 error = %error,
-                "{THREAD_TITLE_LOG_PREFIX} provider init failed; leaving placeholder title"
+                "{THREAD_TITLE_LOG_PREFIX} provider init failed; applying fallback title"
             );
+            let updated = update_thread_with_fallback_title(dir, thread, &first_user_message)?;
             return Ok(envelope(
-                thread_to_summary(thread),
+                thread_to_summary(updated),
                 Some(counts([("num_threads", 1)])),
                 None,
             ));
@@ -323,10 +364,11 @@ pub async fn thread_generate_title(
             tracing::warn!(
                 thread_id = %request.thread_id,
                 error = %error,
-                "{THREAD_TITLE_LOG_PREFIX} title generation failed; leaving placeholder title"
+                "{THREAD_TITLE_LOG_PREFIX} title generation failed; applying fallback title"
             );
+            let updated = update_thread_with_fallback_title(dir, thread, &first_user_message)?;
             return Ok(envelope(
-                thread_to_summary(thread),
+                thread_to_summary(updated),
                 Some(counts([("num_threads", 1)])),
                 None,
             ));
@@ -338,10 +380,11 @@ pub async fn thread_generate_title(
             thread_id = %request.thread_id,
             raw_title_len = raw_title.chars().count(),
             raw_title_hash = %title_log_fingerprint(&raw_title),
-            "{THREAD_TITLE_LOG_PREFIX} generated empty title after sanitization"
+            "{THREAD_TITLE_LOG_PREFIX} generated empty title after sanitization; applying fallback title"
         );
+        let updated = update_thread_with_fallback_title(dir, thread, &first_user_message)?;
         return Ok(envelope(
-            thread_to_summary(thread),
+            thread_to_summary(updated),
             Some(counts([("num_threads", 1)])),
             None,
         ));
@@ -428,9 +471,28 @@ pub async fn thread_delete(
     request: DeleteConversationThreadRequest,
 ) -> Result<RpcOutcome<ApiEnvelope<DeleteConversationThreadResponse>>, String> {
     let dir = workspace_dir().await?;
-    let deleted = conversations::ConversationStore::new(dir)
+    let deleted = conversations::ConversationStore::new(dir.clone())
         .delete_thread(&request.thread_id, &request.deleted_at)?;
+    // Invalidate the in-process web-channel session BEFORE the
+    // turn-state cleanup. The snapshot deletion is fallible and
+    // returns early on error; if invalidation ran after, an active
+    // session for the now-deleted thread could linger and try to
+    // append to a thread index row that no longer exists.
     web_channel::invalidate_thread_sessions(&request.thread_id).await;
+    // Drop any persisted in-flight turn snapshot for this thread —
+    // otherwise `threads_turn_state_list` keeps surfacing it (as
+    // `Interrupted` on next restart) for a thread that no longer
+    // exists. Failure here is surfaced as an RPC error so callers
+    // can't observe a thread "deleted" while its snapshot (which
+    // mirrors conversation-derived state) remains on disk; the
+    // thread row itself is already gone at this point so the caller
+    // sees a partial failure they can act on instead of silent drift.
+    turn_state::store::delete(dir, &request.thread_id).map_err(|err| {
+        format!(
+            "thread {} deleted but turn-snapshot cleanup failed: {err}",
+            request.thread_id
+        )
+    })?;
     Ok(envelope(
         DeleteConversationThreadResponse { deleted },
         None,
@@ -443,7 +505,16 @@ pub async fn threads_purge(
     _request: EmptyRequest,
 ) -> Result<RpcOutcome<ApiEnvelope<PurgeConversationThreadsResponse>>, String> {
     let dir = workspace_dir().await?;
-    let stats = conversations::purge_threads(dir)?;
+    let stats = conversations::purge_threads(dir.clone())?;
+    // Threads are gone, so any orphan turn snapshots can never be
+    // reattached to a live thread. Wipe them in the same call so
+    // `turn_state_list` returns an empty set after a purge. Use the
+    // parse-independent `clear_all` so corrupted / half-written
+    // snapshot files (which `list()` would warn-and-skip) are also
+    // removed — a destructive cleanup must not leave behind anything
+    // it failed to deserialize. Failures surface as RPC errors.
+    turn_state::store::clear_all(dir.clone())
+        .map_err(|err| format!("threads purged but turn-snapshot cleanup failed: {err}"))?;
     Ok(envelope(
         PurgeConversationThreadsResponse {
             messages_deleted: stats.message_count,
@@ -453,6 +524,45 @@ pub async fn threads_purge(
         None,
         None,
     ))
+}
+
+/// Returns the persisted in-flight turn snapshot for a thread, if any.
+pub async fn turn_state_get(
+    request: GetTurnStateRequest,
+) -> Result<RpcOutcome<ApiEnvelope<GetTurnStateResponse>>, String> {
+    let dir = workspace_dir().await?;
+    let turn_state = turn_state::store::get(dir, &request.thread_id)?;
+    let present = turn_state.is_some();
+    Ok(envelope(
+        GetTurnStateResponse { turn_state },
+        Some(counts([("present", usize::from(present))])),
+        None,
+    ))
+}
+
+/// Lists every persisted turn snapshot — used by the UI on cold boot to
+/// surface interrupted turns from a previous process.
+pub async fn turn_state_list(
+    _request: EmptyRequest,
+) -> Result<RpcOutcome<ApiEnvelope<ListTurnStatesResponse>>, String> {
+    let dir = workspace_dir().await?;
+    let turn_states = turn_state::store::list(dir)?;
+    let count = turn_states.len();
+    Ok(envelope(
+        ListTurnStatesResponse { turn_states, count },
+        Some(counts([("num_turn_states", count)])),
+        None,
+    ))
+}
+
+/// Clears the persisted turn snapshot for a thread (e.g. after the user
+/// dismisses an "interrupted" banner).
+pub async fn turn_state_clear(
+    request: ClearTurnStateRequest,
+) -> Result<RpcOutcome<ApiEnvelope<ClearTurnStateResponse>>, String> {
+    let dir = workspace_dir().await?;
+    let cleared = turn_state::store::delete(dir, &request.thread_id)?;
+    Ok(envelope(ClearTurnStateResponse { cleared }, None, None))
 }
 
 #[cfg(test)]

@@ -4500,7 +4500,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openhuman"
-version = "0.53.13"
+version = "0.53.16"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4528,6 +4528,7 @@ dependencies = [
  "fs2",
  "futures",
  "futures-util",
+ "glob",
  "hex",
  "hmac 0.12.1",
  "hostname",
@@ -4589,6 +4590,7 @@ dependencies = [
  "uuid",
  "wacore",
  "wait-timeout",
+ "walkdir",
  "webpki-roots 1.0.6",
  "whatsapp-rust",
  "whatsapp-rust-tokio-transport",

@@ -7,10 +7,13 @@ mod cef_preflight;
 mod cef_profile;
 mod core_process;
 mod core_rpc;
+mod dictation_hotkeys;
 mod discord_scanner;
-mod gmail;
 mod gmessages_scanner;
 mod imessage_scanner;
+#[cfg(target_os = "macos")]
+mod mascot_native_window;
+mod native_notifications;
 mod notification_settings;
 mod screen_capture;
 mod slack_scanner;
@@ -19,8 +22,6 @@ mod webview_accounts;
 mod webview_apis;
 mod whatsapp_scanner;
 mod window_state;
-
-use std::sync::Mutex;
 
 #[cfg(target_os = "macos")]
 use tauri::WindowEvent;
@@ -44,37 +45,6 @@ use objc2_app_kit::{NSPanel, NSWindowCollectionBehavior, NSWindowStyleMask};
 
 // CEF is the only runtime; alias kept so command handlers thread the runtime generic uniformly.
 pub(crate) type AppRuntime = tauri::Cef;
-
-/// Tracks the currently registered dictation hotkey string so we can unregister it later.
-struct DictationHotkeyState(Mutex<Vec<String>>);
-
-fn expand_dictation_shortcuts(shortcut: &str) -> Vec<String> {
-    let trimmed = shortcut.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if trimmed.contains("CmdOrCtrl") {
-            let cmd_variant = trimmed.replace("CmdOrCtrl", "Cmd");
-            let ctrl_variant = trimmed.replace("CmdOrCtrl", "Ctrl");
-            if cmd_variant == ctrl_variant {
-                return vec![cmd_variant];
-            }
-            return vec![cmd_variant, ctrl_variant];
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        if trimmed.contains("CmdOrCtrl") {
-            return vec![trimmed.replace("CmdOrCtrl", "Ctrl")];
-        }
-    }
-
-    vec![trimmed.to_string()]
-}
 
 #[tauri::command]
 fn core_rpc_url() -> String {
@@ -635,12 +605,12 @@ async fn register_dictation_hotkey(
     log::info!("[dictation] register_dictation_hotkey: shortcut={shortcut}");
 
     let old_shortcuts = {
-        let state = app.state::<DictationHotkeyState>();
+        let state = app.state::<dictation_hotkeys::DictationHotkeyState>();
         let guard = state.0.lock().unwrap();
         guard.clone()
     };
 
-    let expanded_shortcuts = expand_dictation_shortcuts(&shortcut);
+    let expanded_shortcuts = dictation_hotkeys::expand_dictation_shortcuts(&shortcut);
     if expanded_shortcuts.is_empty() {
         return Err("Shortcut cannot be empty".to_string());
     }
@@ -706,7 +676,7 @@ async fn register_dictation_hotkey(
 
     // Persist all newly registered shortcuts.
     {
-        let state = app.state::<DictationHotkeyState>();
+        let state = app.state::<dictation_hotkeys::DictationHotkeyState>();
         let mut guard = state.0.lock().unwrap();
         *guard = expanded_shortcuts.clone();
     }
@@ -722,7 +692,7 @@ async fn register_dictation_hotkey(
 #[tauri::command]
 async fn unregister_dictation_hotkey(app: AppHandle<AppRuntime>) -> Result<(), String> {
     log::info!("[dictation] unregister_dictation_hotkey: called");
-    let state = app.state::<DictationHotkeyState>();
+    let state = app.state::<dictation_hotkeys::DictationHotkeyState>();
     let mut guard = state.0.lock().unwrap();
     if guard.is_empty() {
         log::debug!("[dictation] no shortcut registered — nothing to unregister");
@@ -754,126 +724,50 @@ fn activate_main_window(app: AppHandle<AppRuntime>) -> Result<(), String> {
     show_main_window(&app)
 }
 
-/// Tauri command: fire a native OS notification from the frontend. Used by
-/// the in-app notification center to banner events (agent completions,
-/// connection drops, etc.) when the window is not focused.
+/// Show the floating mascot. macOS: native NSPanel + WKWebView (so the
+/// window is actually transparent — vendored tauri-cef can't render
+/// transparent windowed-mode browsers). Loads the Vite dev URL in
+/// development and the bundled `index.html` in production. Other OSes:
+/// not yet wired up.
 #[tauri::command]
-fn show_native_notification(
-    app: AppHandle<AppRuntime>,
-    title: String,
-    body: String,
-    tag: Option<String>,
-) -> Result<(), String> {
-    use tauri_plugin_notification::NotificationExt;
-    let permission_state = app
-        .notification()
-        .permission_state()
-        .map(|s| format!("{s:?}"))
-        .unwrap_or_else(|e| format!("err({e})"));
-    log::debug!(
-        "[notify] show_native_notification title_chars={} body_chars={} tag={:?} permission={permission_state}",
-        title.len(),
-        body.len(),
-        tag
-    );
-    let mut builder = app.notification().builder().title(&title);
-    if !body.is_empty() {
-        builder = builder.body(&body);
-    }
+fn mascot_window_show(app: AppHandle<AppRuntime>) -> Result<(), String> {
+    log::info!("[mascot-window] show requested");
     #[cfg(target_os = "macos")]
     {
-        builder = builder.sound("default");
-    }
-    builder
-        .show()
-        .map_err(|e| format!("notification show failed: {e}"))
-}
-
-#[cfg(target_os = "macos")]
-fn macos_notification_permission_state_inner() -> Result<String, String> {
-    use std::ptr::NonNull;
-    use std::sync::mpsc;
-
-    use block2::RcBlock;
-    use objc2_user_notifications::{
-        UNAuthorizationStatus, UNNotificationSettings, UNUserNotificationCenter,
-    };
-
-    let center = UNUserNotificationCenter::currentNotificationCenter();
-    let (tx, rx) = mpsc::channel::<String>();
-    let completion = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
-        let status = unsafe { settings.as_ref().authorizationStatus() };
-        let state = if status == UNAuthorizationStatus::Authorized {
-            "granted"
-        } else if status == UNAuthorizationStatus::Denied {
-            "denied"
-        } else if status == UNAuthorizationStatus::NotDetermined {
-            "not_determined"
-        } else if status == UNAuthorizationStatus::Provisional {
-            "provisional"
-        } else if status == UNAuthorizationStatus::Ephemeral {
-            "ephemeral"
-        } else {
-            "unknown"
-        };
-        let _ = tx.send(state.to_string());
-    });
-    center.getNotificationSettingsWithCompletionHandler(&completion);
-    rx.recv_timeout(std::time::Duration::from_secs(2))
-        .map_err(|_| "timed out waiting for macOS notification settings".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn macos_notification_permission_request_inner() -> Result<String, String> {
-    use block2::RcBlock;
-    use objc2::runtime::Bool;
-    use objc2_foundation::NSError;
-    use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
-    use std::sync::mpsc;
-
-    let center = UNUserNotificationCenter::currentNotificationCenter();
-    let (tx, rx) = mpsc::channel::<bool>();
-    let options = UNAuthorizationOptions::Alert
-        | UNAuthorizationOptions::Badge
-        | UNAuthorizationOptions::Sound;
-    let completion = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
-        let _ = tx.send(granted.as_bool());
-    });
-    center.requestAuthorizationWithOptions_completionHandler(options, &completion);
-    let granted = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "timed out waiting for macOS permission prompt result".to_string())?;
-    if granted {
-        Ok("granted".to_string())
-    } else {
-        // If the user denies or notifications are disabled for the app,
-        // macOS reports `false` here.
-        Ok("denied".to_string())
-    }
-}
-
-#[tauri::command]
-fn notification_permission_state() -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        return macos_notification_permission_state_inner();
+        return mascot_native_window::show(&app);
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok("granted".to_string())
+        let _ = app;
+        Err("floating mascot window is macOS-only for now".into())
     }
 }
 
+/// Hide the floating mascot.
 #[tauri::command]
-fn notification_permission_request() -> Result<String, String> {
+fn mascot_window_hide(app: AppHandle<AppRuntime>) -> Result<(), String> {
+    log::info!("[mascot-window] hide requested");
     #[cfg(target_os = "macos")]
     {
-        return macos_notification_permission_request_inner();
+        let _ = app;
+        mascot_native_window::hide();
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok("granted".to_string())
+        let _ = app;
+        Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mascot_native_window_is_open() -> bool {
+    mascot_native_window::is_open()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mascot_native_window_is_open() -> bool {
+    false
 }
 
 fn show_main_window(app: &AppHandle<AppRuntime>) -> Result<(), String> {
@@ -912,6 +806,22 @@ fn setup_tray(app: &AppHandle<AppRuntime>) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit_item = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
+    // The floating mascot has a native NSPanel + WKWebView host, so the
+    // tray entry only does anything on macOS. Don't surface a menu item
+    // on Windows that's guaranteed to error — gate it to the platform
+    // where `mascot_window_show` actually works.
+    #[cfg(target_os = "macos")]
+    let menu = {
+        let mascot_item = MenuItem::with_id(
+            app,
+            "tray_toggle_mascot",
+            "Toggle floating mascot",
+            true,
+            None::<&str>,
+        )?;
+        Menu::with_items(app, &[&show_item, &mascot_item, &quit_item])?
+    };
+    #[cfg(not(target_os = "macos"))]
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
     let icon = app
@@ -927,6 +837,16 @@ fn setup_tray(app: &AppHandle<AppRuntime>) -> tauri::Result<()> {
                 log::info!("[tray] action=show_window source=menu");
                 if let Err(err) = show_main_window(app) {
                     log::error!("[tray] failed to show main window from menu: {err}");
+                }
+            }
+            "tray_toggle_mascot" => {
+                log::info!("[tray] action=toggle_mascot source=menu");
+                if mascot_native_window_is_open() {
+                    if let Err(err) = mascot_window_hide(app.clone()) {
+                        log::error!("[tray] failed to hide mascot window: {err}");
+                    }
+                } else if let Err(err) = mascot_window_show(app.clone()) {
+                    log::error!("[tray] failed to show mascot window: {err}");
                 }
             }
             "tray_quit" => {
@@ -997,16 +917,86 @@ fn teardown_cef_prewarm<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), Str
     Ok(())
 }
 
+const CEF_CLOSE_FIXED_YIELD: std::time::Duration = std::time::Duration::from_millis(20);
+const CEF_CLOSE_POLL_BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+const CEF_CLOSE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+fn close_early_cef_webviews<R: tauri::Runtime>(app: &AppHandle<R>) -> Vec<String> {
+    let mut closed_labels = Vec::new();
+    if teardown_cef_prewarm(app).is_ok() {
+        closed_labels.push(CEF_PREWARM_LABEL.to_string());
+    }
+    if let Some(state) = app.try_state::<webview_accounts::WebviewAccountsState>() {
+        closed_labels.extend(state.shutdown_all(app));
+    }
+    closed_labels
+}
+
+fn shutdown_imessage_scanner<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(registry) = app.try_state::<std::sync::Arc<imessage_scanner::ScannerRegistry>>() {
+        registry.inner().shutdown();
+    }
+}
+
+fn pending_cef_webview_labels<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    labels: &[String],
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    labels
+        .iter()
+        .filter(|label| seen.insert((*label).clone()))
+        .filter(|label| app.get_webview(label.as_str()).is_some())
+        .cloned()
+        .collect()
+}
+
+async fn wait_for_cef_webviews_to_close_async<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    labels: &[String],
+) {
+    if labels.is_empty() {
+        return;
+    }
+    log::info!(
+        "[app] waiting for CEF webview close requests labels={:?}",
+        labels
+    );
+    tokio::time::sleep(CEF_CLOSE_FIXED_YIELD).await;
+    let start = std::time::Instant::now();
+    let mut pending = pending_cef_webview_labels(app, labels);
+    while !pending.is_empty() && start.elapsed() < CEF_CLOSE_POLL_BUDGET {
+        tokio::time::sleep(CEF_CLOSE_POLL_INTERVAL).await;
+        pending = pending_cef_webview_labels(app, labels);
+    }
+    if pending.is_empty() {
+        log::info!(
+            "[app] CEF webview close poll drained labels={:?} elapsed_ms={}",
+            labels,
+            start.elapsed().as_millis()
+        );
+    } else {
+        log::info!(
+            "[app] CEF webview close poll still pending labels={:?} elapsed_ms={} (will continue in runtime shutdown)",
+            pending,
+            start.elapsed().as_millis()
+        );
+    }
+}
+
 /// Shared early teardown logic before CEF's shutdown to prevent races and zombie processes.
-/// Synchronous version to be called from the main thread (e.g. `RunEvent::ExitRequested` or tray menu events).
+///
+/// Synchronous entry used from `RunEvent::ExitRequested` and tray quit. We intentionally
+/// **do not** poll here with `std::thread::sleep` — that would block the Tauri / CEF main
+/// event loop and prevent close messages from being processed. Close requests are issued
+/// in [`close_early_cef_webviews`]; the exit pump drains them. Use
+/// [`perform_early_teardown_async`] when an async caller can await
+/// [`wait_for_cef_webviews_to_close_async`] without starving the UI loop.
 fn perform_early_teardown_sync(app_handle: &AppHandle<AppRuntime>) {
     log::info!("[app] perform_early_teardown_sync — early teardown");
 
-    let _ = teardown_cef_prewarm(app_handle);
-
-    if let Some(state) = app_handle.try_state::<webview_accounts::WebviewAccountsState>() {
-        state.shutdown_all(app_handle);
-    }
+    let closed_labels = close_early_cef_webviews(app_handle);
+    shutdown_imessage_scanner(app_handle);
 
     webview_apis::server::stop();
 
@@ -1019,9 +1009,12 @@ fn perform_early_teardown_sync(app_handle: &AppHandle<AppRuntime>) {
         });
     }
 
-    // Give CEF's UI message loop a brief window to process the
-    // queued browser close messages before the runtime calls `cef::shutdown()`.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    if !closed_labels.is_empty() {
+        log::info!(
+            "[app] sync early teardown: close requested for labels={:?} — skipping main-thread poll so the event loop can drain CEF",
+            closed_labels
+        );
+    }
 
     log::info!("[app] perform_early_teardown_sync — early teardown complete");
 }
@@ -1031,11 +1024,8 @@ fn perform_early_teardown_sync(app_handle: &AppHandle<AppRuntime>) {
 async fn perform_early_teardown_async(app_handle: &AppHandle<AppRuntime>) {
     log::info!("[app] perform_early_teardown_async — early teardown");
 
-    let _ = teardown_cef_prewarm(app_handle);
-
-    if let Some(state) = app_handle.try_state::<webview_accounts::WebviewAccountsState>() {
-        state.shutdown_all(app_handle);
-    }
+    let closed_labels = close_early_cef_webviews(app_handle);
+    shutdown_imessage_scanner(app_handle);
 
     webview_apis::server::stop();
 
@@ -1044,9 +1034,7 @@ async fn perform_early_teardown_async(app_handle: &AppHandle<AppRuntime>) {
         core.send_terminate_signal().await;
     }
 
-    // Give CEF's UI message loop a brief window to process the
-    // queued browser close messages before the runtime calls `cef::shutdown()`.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    wait_for_cef_webviews_to_close_async(app_handle, &closed_labels).await;
 
     log::info!("[app] perform_early_teardown_async — early teardown complete");
 }
@@ -1227,7 +1215,9 @@ pub fn run() {
         // build time with `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`); see
         // docs/AUTO_UPDATE.md for the full pipeline.
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(DictationHotkeyState(Mutex::new(Vec::new())))
+        .manage(dictation_hotkeys::DictationHotkeyState(
+            std::sync::Mutex::new(Vec::new()),
+        ))
         .manage(webview_accounts::WebviewAccountsState::default())
         .manage(notification_settings::NotificationSettingsState::new())
         .manage(PendingAppUpdateState::default());
@@ -1282,7 +1272,7 @@ pub fn run() {
 
             // Expose the shared CEF cookies SQLite path to the core sidecar
             // so `check_onboarding_status` can detect which webview
-            // providers (gmail, whatsapp, slack, …) already have a live
+            // providers (whatsapp, slack, telegram, …) already have a live
             // session cookie. Best-effort — if we can't resolve the path
             // the core treats every provider as logged_out.
             if let Some(cache_dir) = cef_profile::configured_cache_path_from_env() {
@@ -1580,63 +1570,6 @@ pub fn run() {
                     });
                 }
             }
-            // OPENHUMAN_DEV_AUTO_GMAIL=<account-id> opens the Gmail account
-            // webview at startup so the webview_apis bridge has a live CDP
-            // target to attach to. Pair with:
-            //   curl -sS http://127.0.0.1:7788/rpc \
-            //     -H 'Content-Type: application/json' \
-            //     -d '{"jsonrpc":"2.0","id":1,"method":"openhuman.webview_apis_gmail_list_labels","params":{"account_id":"<account-id>"}}'
-            if let Ok(account_id) = std::env::var("OPENHUMAN_DEV_AUTO_GMAIL") {
-                let account_id = account_id.trim().to_string();
-                if !account_id.is_empty() {
-                    let app_handle = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        let state = app_handle.state::<webview_accounts::WebviewAccountsState>();
-                        // Size the Gmail child webview to the parent window
-                        // so the inbox is usable without manual resizing.
-                        let (w, h) = app_handle
-                            .get_webview_window("main")
-                            .and_then(|main| {
-                                let scale = main.scale_factor().unwrap_or(1.0);
-                                main.inner_size()
-                                    .ok()
-                                    .map(|s| ((s.width as f64) / scale, (s.height as f64) / scale))
-                            })
-                            .unwrap_or((1100.0, 780.0));
-                        let args = webview_accounts::OpenArgs {
-                            account_id: account_id.clone(),
-                            provider: "gmail".to_string(),
-                            url: None,
-                            bounds: Some(webview_accounts::Bounds {
-                                x: 0.0,
-                                y: 0.0,
-                                width: w,
-                                height: h,
-                            }),
-                        };
-                        match webview_accounts::webview_account_open(
-                            app_handle.clone(),
-                            state,
-                            args,
-                        )
-                        .await
-                        {
-                            Ok(label) => log::info!(
-                                "[dev-auto-gmail] spawned label={} account={}",
-                                label,
-                                account_id
-                            ),
-                            Err(e) => log::error!(
-                                "[dev-auto-gmail] failed: {} (account={})",
-                                e,
-                                account_id
-                            ),
-                        }
-                    });
-                }
-            }
-
             #[cfg(target_os = "macos")]
             {
                 use std::sync::Arc;
@@ -1689,18 +1622,12 @@ pub fn run() {
             screen_capture::screen_share_begin_session,
             screen_capture::screen_share_thumbnail,
             screen_capture::screen_share_finalize_session,
-            gmail::gmail_list_labels,
-            gmail::gmail_list_messages,
-            gmail::gmail_search,
-            gmail::gmail_get_message,
-            gmail::gmail_send,
-            gmail::gmail_trash,
-            gmail::gmail_add_label,
-            gmail::gmail_find_linkedin_profile_url,
-            notification_permission_state,
-            notification_permission_request,
+            native_notifications::notification_permission_state,
+            native_notifications::notification_permission_request,
             activate_main_window,
-            show_native_notification
+            native_notifications::show_native_notification,
+            mascot_window_show,
+            mascot_window_hide
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1869,43 +1796,6 @@ mod tests {
         let _result = is_daemon_mode();
     }
 
-    /// Test expand_dictation_shortcuts for CmdOrCtrl expansion
-    #[test]
-    fn expand_dictation_shortcuts_cmd_or_ctrl_expansion() {
-        #[cfg(target_os = "macos")]
-        {
-            let result = expand_dictation_shortcuts("CmdOrCtrl+Shift+D");
-            assert_eq!(result.len(), 2);
-            assert!(result.contains(&"Cmd+Shift+D".to_string()));
-            assert!(result.contains(&"Ctrl+Shift+D".to_string()));
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            let result = expand_dictation_shortcuts("CmdOrCtrl+Shift+D");
-            assert_eq!(result.len(), 1);
-            assert_eq!(result[0], "Ctrl+Shift+D");
-        }
-    }
-
-    /// Test expand_dictation_shortcuts with plain shortcut (no CmdOrCtrl)
-    #[test]
-    fn expand_dictation_shortcuts_plain_shortcut() {
-        let result = expand_dictation_shortcuts("Ctrl+Alt+T");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], "Ctrl+Alt+T");
-    }
-
-    /// Test expand_dictation_shortcuts with empty/whitespace input
-    #[test]
-    fn expand_dictation_shortcuts_empty_input() {
-        let result = expand_dictation_shortcuts("");
-        assert!(result.is_empty());
-
-        let result = expand_dictation_shortcuts("   ");
-        assert!(result.is_empty());
-    }
-
     /// Test core_rpc_url returns expected format
     #[test]
     fn core_rpc_url_returns_expected_format() {
@@ -1999,24 +1889,5 @@ mod tests {
         // "[app] RunEvent::Ready — GTK initialized, setting up tray"
         //
         // This test passes if the code compiles with these log messages.
-    }
-
-    /// Test expand_dictation_shortcuts with Cmd-only variant on macOS
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn expand_dictation_shortcuts_macos_cmd_only() {
-        // When CmdOrCtrl is replaced with just Cmd
-        let result = expand_dictation_shortcuts("CmdOrCtrl+Space");
-        assert!(result.contains(&"Cmd+Space".to_string()));
-    }
-
-    /// Test expand_dictation_shortcuts with Ctrl-only variant on non-macOS
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn expand_dictation_shortcuts_non_macos_ctrl_only() {
-        // When CmdOrCtrl is replaced with just Ctrl
-        let result = expand_dictation_shortcuts("CmdOrCtrl+Space");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], "Ctrl+Space");
     }
 }
