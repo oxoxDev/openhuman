@@ -392,7 +392,7 @@ pub fn default_core_port() -> u16 {
 /// Whether `OPENHUMAN_CORE_REUSE_EXISTING` is set to a truthy value. Opts
 /// back into the pre-#1130 behavior of attaching to whatever is listening
 /// on the port without identification — useful for manual harnesses.
-fn reuse_existing_listener_enabled() -> bool {
+pub(crate) fn reuse_existing_listener_enabled() -> bool {
     std::env::var("OPENHUMAN_CORE_REUSE_EXISTING")
         .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)

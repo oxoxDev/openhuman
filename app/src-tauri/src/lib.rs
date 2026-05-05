@@ -16,6 +16,7 @@ mod mascot_native_window;
 mod native_notifications;
 mod notification_settings;
 mod process_kill;
+mod process_recovery;
 mod screen_capture;
 mod slack_scanner;
 mod telegram_scanner;
@@ -1130,6 +1131,9 @@ pub fn run() {
             std::process::exit(1);
         }
     }
+
+    #[cfg(target_os = "macos")]
+    process_recovery::reap_stale_openhuman_processes();
 
     #[cfg(target_os = "macos")]
     if let Err(e) = cef_preflight::check_default_cache() {
