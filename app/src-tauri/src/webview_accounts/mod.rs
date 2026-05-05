@@ -171,6 +171,17 @@ fn url_is_internal(provider: &str, url: &Url) -> bool {
     let Some(host) = url.host_str() else {
         return true;
     };
+    // Google services route the post-2FA `SetSID` cookie-setting hop
+    // through `accounts.youtube.com` and ccTLD `accounts.google.<rest>`
+    // hosts that aren't covered by the suffix-based allowlist. Without
+    // this, the auth chain breaks mid-flight and leaks to the system
+    // browser (#1053 sign-in leak surfaced in dev:app log line:
+    // "external navigation https://accounts.youtube.com/accounts/SetSID?...
+    // → system browser"). Whitelist the full Google SSO host family for
+    // any provider that uses Google identity.
+    if matches!(provider, "gmail" | "google-meet") && is_google_sso_host(host) {
+        return true;
+    }
     let allowed = provider_allowed_hosts(provider);
     if allowed.is_empty() {
         return true;
@@ -289,13 +300,49 @@ fn popup_should_navigate_parent(provider: &str, url: &Url) -> Option<Url> {
     }
 }
 
+/// `true` if `host` is a Google SSO / account-handoff host that may
+/// participate in the OAuth flow for any Google service (Meet, Gmail,
+/// Drive, etc.). Google rotates the post-2FA `SetSID` cookie-setting hop
+/// across `accounts.google.<cctld>` and `accounts.youtube.com` (sic — the
+/// YouTube subdomain is part of the Google identity infra), so a literal
+/// `accounts.google.com` match misses real auth popups and leaks them to
+/// the system browser.
+///
+/// Match family:
+/// - `accounts.google.com`
+/// - `accounts.google.<cctld>` — e.g. `accounts.google.co.in`, `accounts.google.co.uk`,
+///   `accounts.google.de`
+/// - `accounts.googleusercontent.com`
+/// - `accounts.youtube.com` (post-2FA `SetSID` hop)
+/// - `myaccount.google.com`
+fn is_google_sso_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "accounts.google.com"
+        || host == "accounts.googleusercontent.com"
+        || host == "accounts.youtube.com"
+        || host == "myaccount.google.com"
+    {
+        return true;
+    }
+    // ccTLD variants: `accounts.google.<rest>` where rest is some country
+    // suffix. Tighten by requiring `accounts.google.` prefix; we don't
+    // care about deep validation of the cctld portion since the prefix
+    // alone is uniquely Google-owned.
+    if let Some(rest) = host.strip_prefix("accounts.google.") {
+        // Avoid matching `accounts.google.com.evil.com` — `rest` must not
+        // contain a dot beyond what a cctld would have. Allow up to two
+        // dot-separated segments (e.g. `co.in`, `com.au`).
+        let dots = rest.matches('.').count();
+        return !rest.is_empty() && dots <= 1;
+    }
+    false
+}
+
 fn is_google_auth_popup(url: &Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    let is_google_auth_host =
-        host == "accounts.google.com" || host == "accounts.googleusercontent.com";
-    if !is_google_auth_host {
+    if !is_google_sso_host(host) {
         return false;
     }
 
@@ -304,6 +351,7 @@ fn is_google_auth_popup(url: &Url) -> bool {
         || path.contains("servicelogin")
         || path.contains("accountchooser")
         || path.contains("chooseaccount")
+        || path.contains("setsid")
     {
         return true;
     }
@@ -315,7 +363,9 @@ fn is_google_auth_popup(url: &Url) -> bool {
             && (v.contains("signin")
                 || v.contains("servicelogin")
                 || v.contains("accountchooser")
-                || v.contains("chooseaccount"))
+                || v.contains("chooseaccount")
+                || v.contains("meet.google.com")
+                || v.contains("mail.google.com"))
     })
 }
 
@@ -3240,6 +3290,73 @@ mod tests {
             state.track_gmeet_marketing_rewrite(label, later),
             GmeetRewriteAction::Rewrite
         );
+    }
+
+    // ── is_google_sso_host ────────────────────────────────────────
+
+    #[test]
+    fn google_sso_host_matches_canonical_accounts() {
+        assert!(is_google_sso_host("accounts.google.com"));
+        assert!(is_google_sso_host("accounts.googleusercontent.com"));
+        assert!(is_google_sso_host("accounts.youtube.com"));
+        assert!(is_google_sso_host("myaccount.google.com"));
+    }
+
+    #[test]
+    fn google_sso_host_matches_cctld_variants() {
+        assert!(is_google_sso_host("accounts.google.co.in"));
+        assert!(is_google_sso_host("accounts.google.co.uk"));
+        assert!(is_google_sso_host("accounts.google.de"));
+        assert!(is_google_sso_host("accounts.google.fr"));
+        assert!(is_google_sso_host("accounts.google.com.au"));
+    }
+
+    #[test]
+    fn google_sso_host_rejects_phishing_alikes() {
+        // A spoofed host that prefixes accounts.google. shouldn't match
+        // because the rest contains too many dots (full domain hijack).
+        assert!(!is_google_sso_host("accounts.google.com.evil.tld"));
+        assert!(!is_google_sso_host("accounts.google."));
+        assert!(!is_google_sso_host("accounts.google.com.evil.example.com"));
+        // Unrelated google sub-services that aren't sso surfaces.
+        assert!(!is_google_sso_host("mail.google.com"));
+        assert!(!is_google_sso_host("meet.google.com"));
+        assert!(!is_google_sso_host("workspace.google.com"));
+        assert!(!is_google_sso_host("evil.com"));
+    }
+
+    #[test]
+    fn google_sso_host_case_insensitive() {
+        assert!(is_google_sso_host("ACCOUNTS.GOOGLE.COM"));
+        assert!(is_google_sso_host("Accounts.Google.Co.Uk"));
+    }
+
+    // ── url_is_internal: gmeet SSO coverage ───────────────────────
+
+    #[test]
+    fn url_is_internal_allows_youtube_setsid_for_gmeet() {
+        assert!(url_is_internal(
+            "google-meet",
+            &url("https://accounts.youtube.com/accounts/SetSID?ssdc=1&continue=https://meet.google.com/"),
+        ));
+    }
+
+    #[test]
+    fn url_is_internal_allows_cctld_accounts_google_for_gmail() {
+        assert!(url_is_internal(
+            "gmail",
+            &url("https://accounts.google.co.in/signin/v2/identifier"),
+        ));
+    }
+
+    #[test]
+    fn url_is_internal_blocks_unrelated_youtube_for_gmeet() {
+        // Plain youtube.com (e.g. video play) MUST stay external for
+        // gmeet — the SSO bypass only covers `accounts.youtube.com`.
+        assert!(!url_is_internal(
+            "google-meet",
+            &url("https://www.youtube.com/watch?v=abc"),
+        ));
     }
 
     #[test]
