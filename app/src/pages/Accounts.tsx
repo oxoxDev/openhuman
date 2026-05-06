@@ -77,7 +77,15 @@ const RailButton = ({
   <button
     onClick={onClick}
     onContextMenu={onContextMenu}
-    className={`group relative flex h-11 w-11 items-center justify-center rounded-xl transition-all ${
+    // Issue #1284 — `hover:z-50` lifts the entire button (and its tooltip
+    // child) above sibling rail buttons during hover. Without it, the
+    // `hover:scale-105` transform on a non-active button establishes its
+    // own stacking context that traps the tooltip's `z-50` inside it,
+    // and a later sibling button (next in DOM order) paints over the
+    // tooltip rectangle. Belt-and-suspenders for the active-button case
+    // too, where ring-2 + bg-primary-50 don't transform but the lifted
+    // z still helps tooltips render cleanly above neighbours.
+    className={`group relative flex h-11 w-11 items-center justify-center rounded-xl transition-all hover:z-50 ${
       active ? 'bg-primary-50 ring-2 ring-primary-500' : 'hover:bg-stone-100 hover:scale-105'
     }`}
     aria-label={tooltip}>
@@ -279,7 +287,7 @@ const Accounts = () => {
 
         <button
           onClick={() => setAddOpen(true)}
-          className="group relative mt-2 flex h-11 w-11 items-center justify-center rounded-xl border border-dashed border-stone-300 text-stone-400 hover:bg-stone-50 hover:text-stone-600"
+          className="group relative mt-2 flex h-11 w-11 items-center justify-center rounded-xl border border-dashed border-stone-300 text-stone-400 hover:z-50 hover:bg-stone-50 hover:text-stone-600"
           aria-label="Add app">
           <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
