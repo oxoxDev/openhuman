@@ -2170,8 +2170,12 @@ pub async fn webview_account_open<R: Runtime>(
                 args.account_id
             );
         } else {
-            let cdp::SpawnedSession { session, watchdog } =
-                cdp::spawn_session(app.clone(), args.account_id.clone(), real_url_str.clone());
+            let cdp::SpawnedSession { session, watchdog } = cdp::spawn_session(
+                app.clone(),
+                args.account_id.clone(),
+                real_url_str.clone(),
+                args.provider.clone(),
+            );
             if let Some(old) = state
                 .cdp_sessions
                 .lock()
