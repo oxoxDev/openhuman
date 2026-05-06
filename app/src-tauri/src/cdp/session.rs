@@ -32,7 +32,18 @@ const ATTACH_BACKOFF: Duration = Duration::from_secs(2);
 /// Watchdog budget before we synthesise a `webview-account:load` event with
 /// `state: "timeout"` so the frontend can switch from an empty loading state
 /// to explicit retry/help UI on flaky networks. Matches issue #867.
-const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Google Meet is heavier than other providers (heavy `recipe.js` + OAuth
+/// loop) and routinely takes > 15s to paint on cold open. See #1213.
+const GMEET_LOAD_TIMEOUT: Duration = Duration::from_secs(25);
+
+pub fn load_timeout_for(provider: &str) -> Duration {
+    match provider {
+        "google-meet" => GMEET_LOAD_TIMEOUT,
+        _ => DEFAULT_LOAD_TIMEOUT,
+    }
+}
 
 /// Returns the unique marker substring that the account's initial
 /// placeholder URL contains so `Target.getTargets` can identify it.
@@ -127,12 +138,13 @@ pub fn spawn_session<R: Runtime>(
     app: AppHandle<R>,
     account_id: String,
     real_url: String,
+    provider: String,
 ) -> SpawnedSession {
     // Load-overlay watchdog — independent of the session loop. Emits a
-    // `timeout` signal after LOAD_TIMEOUT so the frontend's loading spinner
-    // is always released even if neither the native `on_page_load` nor the
-    // CDP `Page.loadEventFired` signal arrives (flaky network, provider
-    // blocking, CDP socket hiccup).
+    // `timeout` signal after the watchdog budget so the frontend's loading
+    // spinner is always released even if neither the native `on_page_load`
+    // nor the CDP `Page.loadEventFired` signal arrives (flaky network,
+    // provider blocking, CDP socket hiccup).
     //
     // `emit_load_finished` only treats terminal load signals (`finished`) as
     // dedup markers. If the watchdog fires first, frontend sees `timeout`
@@ -145,8 +157,9 @@ pub fn spawn_session<R: Runtime>(
         let app = app.clone();
         let account_id = account_id.clone();
         let real_url = real_url.clone();
+        let timeout = load_timeout_for(&provider);
         tokio::spawn(async move {
-            sleep(LOAD_TIMEOUT).await;
+            sleep(timeout).await;
             emit_load_finished(&app, &account_id, "timeout", &real_url);
         })
     };
@@ -509,6 +522,26 @@ mod tests {
         assert!(!origin_host_is("https://meet.google.com", "app.slack.com"));
         // non-http schemes never match (e.g. about:blank popup placeholder)
         assert!(!origin_host_is("about:blank", "app.slack.com"));
+    }
+
+    #[test]
+    fn load_timeout_for_google_meet_is_25s() {
+        assert_eq!(load_timeout_for("google-meet"), Duration::from_secs(25));
+    }
+
+    #[test]
+    fn load_timeout_for_slack_is_15s() {
+        assert_eq!(load_timeout_for("slack"), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn load_timeout_for_empty_is_15s() {
+        assert_eq!(load_timeout_for(""), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn load_timeout_for_unknown_is_15s() {
+        assert_eq!(load_timeout_for("some-unknown-provider"), Duration::from_secs(15));
     }
 
     #[test]
