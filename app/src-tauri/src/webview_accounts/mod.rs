@@ -1358,8 +1358,15 @@ impl RevealTrigger {
 
     fn from_ipc(raw: Option<&str>) -> Self {
         match raw {
+            Some("load") | None => Self::Load,
             Some("watchdog") => Self::Watchdog,
-            _ => Self::Load,
+            Some(other) => {
+                log::warn!(
+                    "[webview-accounts] unknown reveal trigger {:?}; defaulting to load",
+                    other
+                );
+                Self::Load
+            }
         }
     }
 }
@@ -3003,6 +3010,20 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).expect("valid url")
+    }
+
+    #[test]
+    fn reveal_trigger_from_ipc_warns_and_defaults_unknown_to_load() {
+        assert_eq!(RevealTrigger::from_ipc(None), RevealTrigger::Load);
+        assert_eq!(RevealTrigger::from_ipc(Some("load")), RevealTrigger::Load);
+        assert_eq!(
+            RevealTrigger::from_ipc(Some("watchdog")),
+            RevealTrigger::Watchdog
+        );
+        assert_eq!(
+            RevealTrigger::from_ipc(Some("watchdog-typo")),
+            RevealTrigger::Load
+        );
     }
 
     // ── shutdown teardown ──────────────────────────────────
