@@ -87,7 +87,15 @@ const RailButton = ({
         {badge > 99 ? '99+' : badge}
       </span>
     ) : null}
-    <span className="pointer-events-none absolute left-full ml-3 whitespace-nowrap rounded-md bg-stone-900 px-2 py-1 text-xs text-white opacity-0 shadow-md transition-opacity group-hover:opacity-100 z-50">
+    {/* Issue #1284 — tooltip sits BELOW the icon (`top-full`) so it stays
+        inside the HTML-only rail region. The native CEF webview is
+        composited above the HTML layer to the right of the rail, so a
+        right-anchored tooltip is hidden behind the webview the moment a
+        provider is open and DOM z-index can't lift it. Below-icon keeps
+        the tooltip near the cursor and never blocks the icon being
+        hovered (it briefly overlays the next icon down, which clears as
+        soon as the user moves the cursor). */}
+    <span className="pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded-md bg-stone-900 px-2 py-1 text-xs text-white opacity-0 shadow-md transition-opacity group-hover:opacity-100 z-50">
       {tooltip}
     </span>
   </button>
@@ -276,7 +284,9 @@ const Accounts = () => {
           <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
-          <span className="pointer-events-none absolute left-full ml-3 whitespace-nowrap rounded-md bg-stone-900 px-2 py-1 text-xs text-white opacity-0 shadow-md transition-opacity group-hover:opacity-100 z-50">
+          {/* Issue #1284 — see RailButton for why the tooltip sits below
+              the icon instead of to the right. */}
+          <span className="pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded-md bg-stone-900 px-2 py-1 text-xs text-white opacity-0 shadow-md transition-opacity group-hover:opacity-100 z-50">
             Add app
           </span>
         </button>
