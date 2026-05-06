@@ -26,7 +26,6 @@ pub async fn flush_meeting<R: Runtime>(
     meeting_id: MeetingId,
 ) -> IngestOutcome {
     if let Some(store) = app.try_state::<Arc<Mutex<MeetingTranscriptStore>>>() {
-        // We use a separate module for ingestion logic to keep mod.rs clean
         ingest::flush_meeting(app, account_id, meeting_id, &store).await
     } else {
         IngestOutcome::Retry("MeetingTranscriptStore not found in app state".to_string())
