@@ -2462,18 +2462,44 @@ pub async fn webview_recipe_event<R: Runtime>(
                     .get("code")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let n = args
+                let captions = args
                     .payload
                     .get("captions")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.len())
-                    .unwrap_or(0);
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| {
+                                let speaker = v.get("speaker")?.as_str()?.to_string();
+                                let text = v.get("text")?.as_str()?.to_string();
+                                let ts = v
+                                    .get("ts")
+                                    .and_then(|v| v.as_i64())
+                                    .or_else(|| args.payload.get("ts").and_then(|v| v.as_i64()))
+                                    .or_else(|| {
+                                        args.payload.get("startedAt").and_then(|v| v.as_i64())
+                                    })
+                                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                                Some(crate::google_meet::CaptionLine { speaker, text, ts })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
                 log::info!(
                     "[gmeet][{}] captions code={} rows={}",
                     args.account_id,
                     code,
-                    n
+                    captions.len()
                 );
+
+                if !captions.is_empty() {
+                    let app_handle = app.clone();
+                    let meeting_id = crate::google_meet::MeetingId(code.to_string());
+                    tauri::async_runtime::spawn(async move {
+                        crate::google_meet::record_caption_batch(&app_handle, meeting_id, captions)
+                            .await;
+                    });
+                }
             }
             "meet_call_ended" => {
                 let code = args
@@ -2492,6 +2518,16 @@ pub async fn webview_recipe_event<R: Runtime>(
                     code,
                     reason
                 );
+
+                let app_handle = app.clone();
+                let account_id = args.account_id.clone();
+                let meeting_id = crate::google_meet::MeetingId(code.to_string());
+                tauri::async_runtime::spawn(async move {
+                    let outcome =
+                        crate::google_meet::flush_meeting(&app_handle, &account_id, meeting_id)
+                            .await;
+                    log::info!("[gmeet][{}] flush outcome: {:?}", account_id, outcome);
+                });
             }
             _ => {}
         }

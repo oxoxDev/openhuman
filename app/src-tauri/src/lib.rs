@@ -9,6 +9,7 @@ mod core_process;
 mod core_rpc;
 mod discord_scanner;
 mod gmessages_scanner;
+mod google_meet;
 mod imessage_scanner;
 #[cfg(target_os = "macos")]
 mod mascot_native_window;
@@ -1381,6 +1382,9 @@ pub fn run() {
     let builder = builder.manage(discord_scanner::ScannerRegistry::new());
     let builder = builder.manage(telegram_scanner::ScannerRegistry::new());
     let builder = builder.manage(screen_capture::ScreenShareState::new());
+    let builder = builder.manage(std::sync::Arc::new(tokio::sync::Mutex::new(
+        google_meet::MeetingTranscriptStore::default(),
+    )));
     builder
         .setup(move |app| {
             #[cfg(any(windows, target_os = "linux"))]
