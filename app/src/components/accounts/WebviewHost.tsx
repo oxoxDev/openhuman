@@ -38,6 +38,43 @@ const PHASE_HINT_AT_MS = 5_000;
 const PHASE_HINT_LATE_MS = 10_000;
 
 /**
+ * Counter-driven phase hint that escalates after 5s/10s of loading.
+ *
+ * Lives in its own component so the elapsed counter resets purely via
+ * mount/unmount: `WebviewHost` only renders this child while the account
+ * is in a loading state, so flipping out of `'loading'` unmounts it and
+ * the next loading run starts fresh from zero. Keeps `WebviewHost`'s
+ * effects free of synchronous `setState` calls (lint rule
+ * `react-hooks/set-state-in-effect`) while preserving deterministic
+ * fake-timer behaviour for tests — counter is incremented by an interval
+ * tick rather than diffing `Date.now()`.
+ */
+const LoadingPhaseHint = ({ accountId }: { accountId: string }) => {
+  const [elapsedMs, setElapsedMs] = useState(0);
+  useEffect(() => {
+    const tickMs = 500;
+    const id = window.setInterval(() => {
+      setElapsedMs(prev => prev + tickMs);
+    }, tickMs);
+    return () => window.clearInterval(id);
+  }, []);
+  const text =
+    elapsedMs >= PHASE_HINT_LATE_MS
+      ? 'Almost ready...'
+      : elapsedMs >= PHASE_HINT_AT_MS
+        ? 'Restoring session...'
+        : null;
+  if (!text) return null;
+  return (
+    <span
+      data-testid={`webview-loading-hint-${accountId}`}
+      className="text-[11px] font-medium text-stone-400">
+      {text}
+    </span>
+  );
+};
+
+/**
  * Reserves a rectangular slot in the React layout that the native child
  * webview is glued to. We measure the placeholder's bounding rect and
  * tell Rust to position the webview at the same spot. On unmount or
@@ -70,32 +107,6 @@ const WebviewHost = ({ accountId, provider }: WebviewHostProps) => {
   const isLoading = status === undefined || LOADING_STATUSES.has(status);
   const isTimeout = status === 'timeout';
   const providerName = PROVIDER_COPY[provider] ?? 'app';
-
-  // Elapsed-ms timer tied to the active load. Resets every time loading
-  // restarts so warm reopens (which flip status to 'open' synchronously)
-  // never trigger the phase hints. Counter-based (rather than wall-clock
-  // diff) so fake-timer tests can drive it deterministically without
-  // mocking `Date`.
-  const [elapsedMs, setElapsedMs] = useState(0);
-  useEffect(() => {
-    if (!isLoading) {
-      setElapsedMs(0);
-      return;
-    }
-    setElapsedMs(0);
-    const tickMs = 500;
-    const id = window.setInterval(() => {
-      setElapsedMs(prev => prev + tickMs);
-    }, tickMs);
-    return () => window.clearInterval(id);
-  }, [isLoading, accountId]);
-
-  const phaseHint =
-    elapsedMs >= PHASE_HINT_LATE_MS
-      ? 'Almost ready...'
-      : elapsedMs >= PHASE_HINT_AT_MS
-        ? 'Restoring session...'
-        : null;
 
   // Spawn / show + keep bounds synced on every layout change.
   // IMPORTANT: both refs are reset on cleanup so switching accountIds
@@ -208,13 +219,7 @@ const WebviewHost = ({ accountId, provider }: WebviewHostProps) => {
               data-testid={`webview-loading-${accountId}`}
               className="flex flex-col items-center gap-2">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-stone-300 border-t-stone-600" />
-              {phaseHint ? (
-                <span
-                  data-testid={`webview-loading-hint-${accountId}`}
-                  className="text-[11px] font-medium text-stone-400">
-                  {phaseHint}
-                </span>
-              ) : null}
+              <LoadingPhaseHint accountId={accountId} />
             </div>
           ) : null}
         </div>

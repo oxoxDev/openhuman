@@ -8,9 +8,9 @@ import WebviewHost from '../components/accounts/WebviewHost';
 // import { isWelcomeLocked } from '../lib/coreState/store';
 // [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
 // import { useCoreState } from '../providers/CoreStateProvider';
+import { usePrewarmMostRecentAccount } from '../hooks/usePrewarmMostRecentAccount';
 import {
   hideWebviewAccount,
-  prewarmWebviewAccount,
   purgeWebviewAccount,
   showWebviewAccount,
   startWebviewAccountService,
@@ -20,6 +20,7 @@ import { useAppDispatch, useAppSelector } from '../store/hooks';
 import { fetchRespondQueue } from '../store/providerSurfaceSlice';
 import type { Account, AccountProvider, ProviderDescriptor } from '../types/accounts';
 import { AGENT_ACCOUNT_ID as AGENT_ID } from '../utils/accountsFullscreen';
+import { writeMruAccountId } from '../utils/webviewAccountMru';
 import { AgentChatPanel } from './Conversations';
 
 function makeAccountId(): string {
@@ -32,29 +33,6 @@ function makeAccountId(): string {
     return `acct-${Date.now().toString(36)}-${suffix}`;
   }
   return `acct-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-// Issue #1233 — most-recently-active account is prewarmed in the background
-// when the user lands on the Accounts page so the first click hits the
-// warm-reopen path. Capped to keep the prewarm cost bounded on power users.
-const MRU_ACCOUNT_KEY = 'webview-accounts:lastActive';
-const PREWARM_MAX_ACCOUNTS = 5;
-
-function readMruAccountId(): string | null {
-  try {
-    return window.localStorage.getItem(MRU_ACCOUNT_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writeMruAccountId(accountId: string): void {
-  try {
-    window.localStorage.setItem(MRU_ACCOUNT_KEY, accountId);
-  } catch {
-    // Storage may be disabled (private mode, sandboxing) — silently skip;
-    // worst case is a normal cold open next session.
-  }
 }
 
 interface RailButtonProps {
@@ -140,22 +118,12 @@ const Accounts = () => {
   // Issue #1233 — prewarm the MRU account once on mount so its CEF profile
   // and provider page are warm before the user actually clicks the rail.
   // Skipped for power users with many accounts to bound the spawn cost.
-  useEffect(() => {
-    const mruId = readMruAccountId();
-    if (!mruId) return;
-    if (order.length === 0 || order.length > PREWARM_MAX_ACCOUNTS) return;
-    const acct = accountsById[mruId];
-    if (!acct) return;
-    // Don't prewarm an already-active or already-loaded account — its
-    // webview is already on-screen / warm.
-    if (acct.id === activeAccountId) return;
-    if (acct.status === 'open' || acct.status === 'loading' || acct.status === 'pending') return;
-    void prewarmWebviewAccount(acct.id, acct.provider);
-    // Run once per Accounts mount — re-firing on every order/status churn
-    // would re-invoke the Tauri command, which is harmless (Rust dedups)
-    // but creates noise.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // The accounts array snapshot is captured by the hook at first render.
+  const accounts: Account[] = useMemo(
+    () => order.map(id => accountsById[id]).filter((a): a is Account => Boolean(a)),
+    [order, accountsById]
+  );
+  usePrewarmMostRecentAccount({ accounts, accountsById, activeAccountId });
 
   // [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
   // Welcome lockdown (#883) — force the Agent pane while the welcome
@@ -175,11 +143,6 @@ const Accounts = () => {
     }, 10_000);
     return () => window.clearInterval(id);
   }, [dispatch]);
-
-  const accounts: Account[] = useMemo(
-    () => order.map(id => accountsById[id]).filter((a): a is Account => Boolean(a)),
-    [order, accountsById]
-  );
 
   const connectedProviders = useMemo(
     () => new Set<AccountProvider>(accounts.map(a => a.provider)),
