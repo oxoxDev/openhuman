@@ -15,6 +15,8 @@ mod imessage_scanner;
 mod mascot_native_window;
 mod native_notifications;
 mod notification_settings;
+mod process_kill;
+mod process_recovery;
 mod screen_capture;
 mod slack_scanner;
 mod telegram_scanner;
@@ -72,6 +74,23 @@ fn overlay_parent_rpc_url() -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+#[tauri::command]
+fn process_diagnostics_list_owned() -> Result<Vec<process_recovery::ProcessInfo>, String> {
+    match process_recovery::enumerate_openhuman_processes() {
+        Ok(processes) => {
+            log::info!(
+                "[startup-recovery] diagnostics listed {} owned OpenHuman processes",
+                processes.len()
+            );
+            Ok(processes)
+        }
+        Err(err) => {
+            log::warn!("[startup-recovery] diagnostics process enumeration failed: {err}");
+            Err(err)
+        }
+    }
 }
 
 #[allow(dead_code)] // Overlay disabled in tauri.conf.json; helper kept for future re-enable.
@@ -1131,6 +1150,9 @@ pub fn run() {
     }
 
     #[cfg(target_os = "macos")]
+    process_recovery::reap_stale_openhuman_processes();
+
+    #[cfg(target_os = "macos")]
     if let Err(e) = cef_preflight::check_default_cache() {
         eprintln!("\n[openhuman] {e}\n");
         std::process::exit(1);
@@ -1404,6 +1426,7 @@ pub fn run() {
                                 width: 900.0,
                                 height: 700.0,
                             }),
+                            prewarm: false,
                         };
                         match webview_accounts::webview_account_open(
                             app_handle.clone(),
@@ -1447,6 +1470,7 @@ pub fn run() {
                                 width: 900.0,
                                 height: 700.0,
                             }),
+                            prewarm: false,
                         };
                         match webview_accounts::webview_account_open(
                             app_handle.clone(),
@@ -1490,6 +1514,7 @@ pub fn run() {
                                 width: 900.0,
                                 height: 700.0,
                             }),
+                            prewarm: false,
                         };
                         match webview_accounts::webview_account_open(
                             app_handle.clone(),
@@ -1548,6 +1573,7 @@ pub fn run() {
                                 width: w,
                                 height: h,
                             }),
+                            prewarm: false,
                         };
                         match webview_accounts::webview_account_open(
                             app_handle.clone(),
@@ -1591,6 +1617,7 @@ pub fn run() {
             core_rpc_url,
             core_rpc_token,
             overlay_parent_rpc_url,
+            process_diagnostics_list_owned,
             check_core_update,
             apply_core_update,
             check_app_update,
@@ -1604,6 +1631,7 @@ pub fn run() {
             register_dictation_hotkey,
             unregister_dictation_hotkey,
             webview_accounts::webview_account_open,
+            webview_accounts::webview_account_prewarm,
             webview_accounts::webview_account_close,
             webview_accounts::webview_account_purge,
             webview_accounts::webview_account_bounds,
@@ -1692,46 +1720,14 @@ pub fn run() {
     // operation every CEF helper (GPU / Network / Utility / Renderer) is
     // gone by now. If anything is still alive — e.g. a renderer that was
     // mid-spawn when the user quit — it would otherwise be re-parented to
-    // launchd on macOS / init on Linux and survive the GUI exit. SIGTERM
-    // its children before this process actually exits.
+    // launchd on macOS / init on Linux and survive the GUI exit. Sweep its
+    // children before this process actually exits.
     //
     // We don't `wait()` on them: the kernel will reap them as our exit
-    // unwinds, and any helper that ignores SIGTERM is a CEF bug we'd
-    // rather see in Activity Monitor than silently SIGKILL.
-    sweep_orphan_children();
-}
-
-/// Send SIGTERM to every direct child of the current process. No-op on
-/// non-Unix platforms (Windows job objects already kill CEF helpers when
-/// the parent exits).
-fn sweep_orphan_children() {
-    #[cfg(unix)]
-    {
-        let pid = std::process::id();
-        match std::process::Command::new("pkill")
-            .args(["-TERM", "-P", &pid.to_string()])
-            .status()
-        {
-            Ok(status) => {
-                // pkill exits 0 if it killed at least one process, 1 if no
-                // matches (the healthy case after cef::shutdown), 2/3 on
-                // error. Both 0 and 1 are expected; log 0 loudly so we
-                // notice when the safety net actually catches something.
-                match status.code() {
-                    Some(0) => log::warn!(
-                        "[app] sweep: SIGTERM'd leftover child processes after cef::shutdown"
-                    ),
-                    Some(1) => log::info!("[app] sweep: no leftover children (clean exit)"),
-                    other => log::warn!("[app] sweep: pkill exited with {:?}", other),
-                }
-            }
-            Err(e) => log::warn!("[app] sweep: failed to invoke pkill: {e}"),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        log::debug!("[app] sweep: skipped on non-unix platform");
-    }
+    // unwinds. Give stubborn helpers a short grace period, then force-kill
+    // anything still parented to us so the GUI exit leaves no background
+    // processes behind.
+    process_kill::sweep_orphan_children();
 }
 
 pub fn run_core_from_args(args: &[String]) -> Result<(), String> {
