@@ -39,6 +39,14 @@ async fn supervised_listener_marks_error_and_restarts_on_failures() {
     let component_name = format!("channel:{name}");
 
     let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(1);
+    // The global health subscriber may have been registered by another test
+    // runtime; keep a fresh subscriber alive for this test's runtime too.
+    crate::core::event_bus::init_global(crate::core::event_bus::DEFAULT_CAPACITY);
+    let _health_handle = crate::core::event_bus::subscribe_global(Arc::new(
+        crate::openhuman::health::bus::HealthSubscriber,
+    ))
+    .expect("event bus should be initialized for channel health test");
+    tokio::task::yield_now().await;
     let handle = spawn_supervised_listener(channel, tx, 1, 1);
 
     let component = wait_for_component_error(&component_name).await;
