@@ -30,7 +30,7 @@ On macOS, hard exits such as Force Quit, `SIGKILL`, or a renderer crash can skip
 
 Startup recovery intentionally skips when `OPENHUMAN_CORE_REUSE_EXISTING=1` is set so manual CLI-core reuse still works. It also skips when the CEF `SingletonLock` is held by a live process, letting the normal second-instance path fail without killing the already-running app.
 
-For diagnostics, the Tauri command `process_diagnostics_list_owned` returns the currently owned process list used by startup recovery. The macOS implementation is bundle-scoped; Linux and Windows currently return an empty list.
+For diagnostics, the Tauri command `process_diagnostics_list_owned` returns the currently owned process list used by startup recovery, or an error if process enumeration fails. The macOS implementation is bundle-scoped; Linux and Windows currently return an empty list.
 
 ## Related
 

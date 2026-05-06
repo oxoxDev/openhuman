@@ -1,5 +1,6 @@
 use serde_json::json;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
+use std::sync::MutexGuard;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -9,23 +10,35 @@ use super::{
 };
 
 struct EnvVarGuard {
-    key: &'static str,
-    old: Option<OsString>,
+    old_values: Vec<(&'static str, Option<OsString>)>,
+    _lock: MutexGuard<'static, ()>,
 }
 
 impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let old = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, old }
+    fn set_many(vars: Vec<(&'static str, OsString)>) -> Self {
+        let lock = crate::openhuman::config::TEST_ENV_LOCK
+            .lock()
+            .expect("test env lock poisoned");
+        let mut old_values = Vec::with_capacity(vars.len());
+        for (key, value) in vars {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            old_values.push((key, old));
+        }
+        Self {
+            old_values,
+            _lock: lock,
+        }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        match &self.old {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
+        for (key, old) in self.old_values.iter().rev() {
+            match old {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }
@@ -67,9 +80,17 @@ async fn wait_until_port_released(port: u16) {
 #[tokio::test]
 async fn shutdown_token_stops_axum_listener_within_timeout() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
-    let _workspace = EnvVarGuard::set("OPENHUMAN_WORKSPACE", workspace.path().as_os_str());
-    let _disable_channels = EnvVarGuard::set("OPENHUMAN_DISABLE_CHANNEL_LISTENERS", "1");
-    let _token = EnvVarGuard::set("OPENHUMAN_CORE_TOKEN", "test-token-shutdown");
+    let _env = EnvVarGuard::set_many(vec![
+        (
+            "OPENHUMAN_WORKSPACE",
+            workspace.path().as_os_str().to_os_string(),
+        ),
+        ("OPENHUMAN_DISABLE_CHANNEL_LISTENERS", OsString::from("1")),
+        (
+            "OPENHUMAN_CORE_TOKEN",
+            OsString::from("test-token-shutdown"),
+        ),
+    ]);
 
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("allocate test port");
     let port = probe.local_addr().expect("local addr").port();

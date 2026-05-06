@@ -367,7 +367,29 @@ impl CoreProcessHandle {
     /// Stop the embedded server task. Safe to call when nothing is running.
     pub async fn shutdown(&self) {
         self.cancel_shutdown_token("").await;
-        self.abort_task("").await;
+        let task = {
+            let mut task_guard = self.task.lock().await;
+            task_guard.take()
+        };
+        let Some(mut task) = task else {
+            return;
+        };
+
+        match timeout(Duration::from_secs(5), &mut task).await {
+            Ok(Ok(())) => {
+                log::info!("[core] embedded core server task stopped gracefully");
+            }
+            Ok(Err(err)) => {
+                log::warn!("[core] embedded core server task ended during shutdown: {err}");
+            }
+            Err(_) => {
+                log::warn!(
+                    "[core] graceful embedded core shutdown timed out; aborting server task"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 
     /// Synchronous-friendly shutdown for `RunEvent::ExitRequested`.
