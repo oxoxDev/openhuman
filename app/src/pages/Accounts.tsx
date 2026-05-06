@@ -10,6 +10,7 @@ import WebviewHost from '../components/accounts/WebviewHost';
 // import { useCoreState } from '../providers/CoreStateProvider';
 import {
   hideWebviewAccount,
+  prewarmWebviewAccount,
   purgeWebviewAccount,
   showWebviewAccount,
   startWebviewAccountService,
@@ -31,6 +32,29 @@ function makeAccountId(): string {
     return `acct-${Date.now().toString(36)}-${suffix}`;
   }
   return `acct-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Issue #1233 — most-recently-active account is prewarmed in the background
+// when the user lands on the Accounts page so the first click hits the
+// warm-reopen path. Capped to keep the prewarm cost bounded on power users.
+const MRU_ACCOUNT_KEY = 'webview-accounts:lastActive';
+const PREWARM_MAX_ACCOUNTS = 5;
+
+function readMruAccountId(): string | null {
+  try {
+    return window.localStorage.getItem(MRU_ACCOUNT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeMruAccountId(accountId: string): void {
+  try {
+    window.localStorage.setItem(MRU_ACCOUNT_KEY, accountId);
+  } catch {
+    // Storage may be disabled (private mode, sandboxing) — silently skip;
+    // worst case is a normal cold open next session.
+  }
 }
 
 interface RailButtonProps {
@@ -95,6 +119,26 @@ const Accounts = () => {
 
   useEffect(() => {
     startWebviewAccountService();
+  }, []);
+
+  // Issue #1233 — prewarm the MRU account once on mount so its CEF profile
+  // and provider page are warm before the user actually clicks the rail.
+  // Skipped for power users with many accounts to bound the spawn cost.
+  useEffect(() => {
+    const mruId = readMruAccountId();
+    if (!mruId) return;
+    if (order.length === 0 || order.length > PREWARM_MAX_ACCOUNTS) return;
+    const acct = accountsById[mruId];
+    if (!acct) return;
+    // Don't prewarm an already-active or already-loaded account — its
+    // webview is already on-screen / warm.
+    if (acct.id === activeAccountId) return;
+    if (acct.status === 'open' || acct.status === 'loading' || acct.status === 'pending') return;
+    void prewarmWebviewAccount(acct.id, acct.provider);
+    // Run once per Accounts mount — re-firing on every order/status churn
+    // would re-invoke the Tauri command, which is harmless (Rust dedups)
+    // but creates noise.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
@@ -164,10 +208,14 @@ const Accounts = () => {
     };
     dispatch(addAccount(acct));
     dispatch(setActiveAccount(id));
+    writeMruAccountId(id);
   };
 
   const selectAgent = () => dispatch(setActiveAccount(AGENT_ID));
-  const selectAccount = (id: string) => dispatch(setActiveAccount(id));
+  const selectAccount = (id: string) => {
+    dispatch(setActiveAccount(id));
+    writeMruAccountId(id);
+  };
 
   const openContextMenu = (accountId: string, e: React.MouseEvent) => {
     e.preventDefault();
