@@ -1627,6 +1627,7 @@ pub fn run() {
             register_dictation_hotkey,
             unregister_dictation_hotkey,
             webview_accounts::webview_account_open,
+            webview_accounts::webview_account_prewarm,
             webview_accounts::webview_account_close,
             webview_accounts::webview_account_purge,
             webview_accounts::webview_account_bounds,

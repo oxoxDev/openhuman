@@ -631,6 +631,14 @@ pub struct WebviewAccountsState {
     /// "Manage your Google Account" from the avatar menu) are passed
     /// through unchanged.
     gmeet_awaiting_handoff: Mutex<HashSet<String>>,
+    /// account_ids spawned via `webview_account_prewarm` that have not yet
+    /// been opened by the user. Issue #1233 — emit_load_finished suppresses
+    /// `webview-account:load` events for these so the React UI never sees
+    /// load/timeout signals for an account it didn't ask to open. The flag
+    /// is cleared on the first user-initiated `webview_account_open`
+    /// (warm-reopen branch) and on close/purge so subsequent reopens flow
+    /// through the normal cold-load lifecycle.
+    prewarm_accounts: Mutex<HashSet<String>>,
 }
 
 /// Threshold and window for the gmeet workspace-marketing rewrite loop
@@ -779,6 +787,12 @@ impl WebviewAccountsState {
         // hijack the first user-initiated `myaccount.google.com` visit
         // after a relaunch back to Meet.
         if let Ok(mut g) = self.gmeet_awaiting_handoff.lock() {
+            g.clear();
+        }
+        // Issue #1233 — clear prewarm flags so a relaunch can't suppress
+        // load events for accounts that were prewarmed in the previous
+        // session.
+        if let Ok(mut g) = self.prewarm_accounts.lock() {
             g.clear();
         }
         self.inner
@@ -1283,6 +1297,19 @@ pub struct OpenArgs {
     pub bounds: Option<Bounds>,
 }
 
+/// Issue #1233 — args for the background `webview_account_prewarm` command.
+/// No bounds — prewarm always spawns at a fixed off-screen 1×1 rect; the
+/// user-initiated open later supplies the visible rect via the warm-reopen
+/// branch in `webview_account_open`.
+#[derive(Debug, Deserialize)]
+pub struct PrewarmArgs {
+    pub account_id: String,
+    pub provider: String,
+    /// Optional URL override (debug tooling) — falls back to `provider_url`.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BoundsArgs {
     pub account_id: String,
@@ -1366,6 +1393,37 @@ pub(crate) fn emit_load_finished<R: Runtime>(
         );
         return;
     };
+
+    // Issue #1233 — accounts in prewarm mode have no React UI listening
+    // for their load events; the user hasn't clicked the rail icon yet.
+    // Suppress emit + reveal so the prewarm cycle finishes silently. The
+    // page is still painted in the off-screen 1×1 webview so the eventual
+    // user click hits the warm-reopen branch and emits `state:"reused"`.
+    if app_state
+        .prewarm_accounts
+        .lock()
+        .unwrap()
+        .contains(account_id)
+    {
+        log::info!(
+            "[webview-accounts][{}] prewarm load suppressed state={} url={}",
+            account_id,
+            state,
+            redact_url_for_log(url)
+        );
+        // Mark the account as loaded so any later signals from the same
+        // cold-load (native on_page_load + CDP Page.loadEventFired both
+        // arriving) don't double-fire if the prewarm flag flips off in
+        // between.
+        if state != "timeout" {
+            app_state
+                .loaded_accounts
+                .lock()
+                .unwrap()
+                .insert(account_id.to_string());
+        }
+        return;
+    }
 
     if state == "timeout" {
         // If we've already observed a terminal load, ignore late watchdogs.
@@ -1633,6 +1691,23 @@ pub async fn webview_account_open<R: Runtime>(
         if let Some(existing_label) = map.get(&args.account_id).cloned() {
             drop(map);
             if let Some(existing) = app.get_webview(&existing_label) {
+                // Issue #1233 — a prewarmed webview is reaching its first
+                // user-initiated open. Clear the prewarm flag BEFORE we
+                // resize/reveal so any in-flight CDP load event still
+                // racing toward `emit_load_finished` flows through the
+                // normal path instead of being silently suppressed.
+                let was_prewarmed = state
+                    .prewarm_accounts
+                    .lock()
+                    .unwrap()
+                    .remove(&args.account_id);
+                if was_prewarmed {
+                    log::info!(
+                        "[webview-accounts] prewarm hit account={} label={} — promoting to live",
+                        args.account_id,
+                        existing_label
+                    );
+                }
                 if let Some(b) = args.bounds {
                     let _ = existing.set_position(LogicalPosition::new(b.x, b.y));
                     let _ = existing.set_size(LogicalSize::new(b.width, b.height));
@@ -2319,6 +2394,158 @@ pub async fn webview_account_open<R: Runtime>(
     Ok(label)
 }
 
+/// Off-screen position used for the prewarmed webview. Same magnitude as
+/// the [`super::lib::CEF_PREWARM_LABEL`] warmup placeholder so the native
+/// view is well outside any plausible monitor layout. Issue #1233.
+const PREWARM_OFFSCREEN_X: f64 = -20_000.0;
+const PREWARM_OFFSCREEN_Y: f64 = -20_000.0;
+
+/// Issue #1233 — spawn a hidden 1×1 webview for `account_id` so its CEF
+/// profile and provider page are warm before the user clicks the rail icon.
+/// On the user's first click, the existing `webview_account_open` warm-reopen
+/// branch reuses the prewarmed webview and emits `state:"reused"` so the React
+/// loading overlay never has to wait for a cold load.
+///
+/// Idempotent — calling for an already-warm account is a no-op. Best-effort —
+/// the frontend can safely fire-and-forget; on failure the worst case is a
+/// normal cold open later.
+#[tauri::command]
+pub async fn webview_account_prewarm<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, WebviewAccountsState>,
+    args: PrewarmArgs,
+) -> Result<(), String> {
+    log::info!(
+        "[webview-accounts] prewarm account_id={} provider={}",
+        args.account_id,
+        args.provider
+    );
+
+    if !provider_is_supported(&args.provider) {
+        return Err(format!("unknown provider: {}", args.provider));
+    }
+
+    // Idempotent — skip if already opened or prewarmed.
+    if state.inner.lock().unwrap().contains_key(&args.account_id) {
+        log::debug!(
+            "[webview-accounts] prewarm skip: account={} already has webview",
+            args.account_id
+        );
+        return Ok(());
+    }
+
+    let real_url_str = args
+        .url
+        .as_deref()
+        .or_else(|| provider_url(&args.provider))
+        .ok_or_else(|| format!("no url for provider: {}", args.provider))?
+        .to_string();
+    let _real_url: Url = real_url_str
+        .parse()
+        .map_err(|e| format!("invalid provider url {real_url_str}: {e}"))?;
+
+    let initial_url_str = cdp::placeholder_url(&args.account_id);
+    let initial_url: Url = initial_url_str
+        .parse()
+        .map_err(|e| format!("invalid initial url {initial_url_str}: {e}"))?;
+
+    let parent_window = app
+        .get_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    let data_dir = data_directory_for(&app, &args.account_id)?;
+    if let Err(err) = std::fs::create_dir_all(&data_dir) {
+        log::warn!(
+            "[webview-accounts] prewarm: failed to create data dir {}: {}",
+            data_dir.display(),
+            err
+        );
+    }
+
+    let label = label_for(&args.account_id);
+    let init_script = build_init_script(&args.account_id, &args.provider);
+
+    let mut builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(initial_url))
+        .data_directory(data_dir);
+    if !init_script.is_empty() {
+        builder = builder.initialization_script(&init_script);
+    }
+    if cfg!(debug_assertions) {
+        builder = builder.devtools(true);
+    }
+    // No on_navigation / on_new_window / on_page_load handlers wired here.
+    // The CDP session below drives Page.navigate to the real URL; load
+    // events flow through `emit_load_finished` which short-circuits while
+    // the account is in the prewarm set.
+
+    // Mark prewarmed BEFORE add_child so the load-event suppression in
+    // `emit_load_finished` is in place by the time the CDP session fires.
+    state
+        .prewarm_accounts
+        .lock()
+        .unwrap()
+        .insert(args.account_id.clone());
+    state
+        .loaded_accounts
+        .lock()
+        .unwrap()
+        .remove(&args.account_id);
+
+    let initial_position = LogicalPosition::new(PREWARM_OFFSCREEN_X, PREWARM_OFFSCREEN_Y);
+    let initial_size = LogicalSize::new(1.0, 1.0);
+
+    let webview = match parent_window.add_child(builder, initial_position, initial_size) {
+        Ok(wv) => wv,
+        Err(e) => {
+            // Clean up the prewarm flag so a subsequent retry can
+            // re-attempt without being shadowed by stale state.
+            state
+                .prewarm_accounts
+                .lock()
+                .unwrap()
+                .remove(&args.account_id);
+            return Err(format!("prewarm add_child failed: {e}"));
+        }
+    };
+
+    log::info!(
+        "[webview-accounts] prewarm spawned label={} offscreen=({},{})",
+        webview.label(),
+        PREWARM_OFFSCREEN_X,
+        PREWARM_OFFSCREEN_Y
+    );
+
+    state
+        .inner
+        .lock()
+        .unwrap()
+        .insert(args.account_id.clone(), label.clone());
+
+    // CDP session navigates the placeholder to the real provider URL.
+    // Load events emit through `emit_load_finished` which suppresses while
+    // `prewarm_accounts` contains the id.
+    let cdp::SpawnedSession { session, watchdog } =
+        cdp::spawn_session(app.clone(), args.account_id.clone(), real_url_str.clone());
+    if let Some(old) = state
+        .cdp_sessions
+        .lock()
+        .unwrap()
+        .insert(args.account_id.clone(), session)
+    {
+        old.abort();
+    }
+    if let Some(old) = state
+        .load_watchdogs
+        .lock()
+        .unwrap()
+        .insert(args.account_id.clone(), watchdog)
+    {
+        old.abort();
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn webview_account_close<R: Runtime>(
     app: AppHandle<R>,
@@ -2375,6 +2602,13 @@ pub async fn webview_account_close<R: Runtime>(
         .remove(&args.account_id);
     state
         .requested_bounds
+        .lock()
+        .unwrap()
+        .remove(&args.account_id);
+    // Issue #1233 — drop the prewarm flag too so a future prewarm dispatch
+    // for the same id can re-attempt cleanly.
+    state
+        .prewarm_accounts
         .lock()
         .unwrap()
         .remove(&args.account_id);
@@ -2442,6 +2676,12 @@ pub async fn webview_account_purge<R: Runtime>(
         .remove(&args.account_id);
     state
         .requested_bounds
+        .lock()
+        .unwrap()
+        .remove(&args.account_id);
+    // Issue #1233 — drop the prewarm flag too on purge.
+    state
+        .prewarm_accounts
         .lock()
         .unwrap()
         .remove(&args.account_id);
@@ -3677,5 +3917,45 @@ mod tests {
         // Stale flag would hijack the first user-initiated
         // `myaccount.google.com` visit after relaunch.
         assert!(!state.take_awaiting_gmeet_handoff("acct_test"));
+    }
+
+    // ── prewarm bookkeeping (issue #1233) ──────────────────
+
+    /// Default state must include an empty `prewarm_accounts` set so
+    /// fresh boots never spuriously suppress load events.
+    #[test]
+    fn prewarm_accounts_default_is_empty() {
+        let state = WebviewAccountsState::default();
+        assert!(state.prewarm_accounts.lock().unwrap().is_empty());
+    }
+
+    /// Inserting an id into `prewarm_accounts` and then removing it should
+    /// leave the set empty — covers the warm-reopen path where the user's
+    /// first click promotes the prewarmed webview to live.
+    #[test]
+    fn prewarm_accounts_insert_then_remove_clears() {
+        let state = WebviewAccountsState::default();
+        state
+            .prewarm_accounts
+            .lock()
+            .unwrap()
+            .insert("acct-1".to_string());
+        assert!(state.prewarm_accounts.lock().unwrap().contains("acct-1"));
+        state.prewarm_accounts.lock().unwrap().remove("acct-1");
+        assert!(!state.prewarm_accounts.lock().unwrap().contains("acct-1"));
+    }
+
+    /// `drain_for_shutdown` must not leak prewarm flags either — otherwise
+    /// a relaunch could spuriously suppress the very first cold open.
+    #[test]
+    fn prewarm_flag_cleared_by_drain_for_shutdown() {
+        let state = WebviewAccountsState::default();
+        state
+            .prewarm_accounts
+            .lock()
+            .unwrap()
+            .insert("acct-warm".to_string());
+        let _ = state.drain_for_shutdown();
+        assert!(state.prewarm_accounts.lock().unwrap().is_empty());
     }
 }
