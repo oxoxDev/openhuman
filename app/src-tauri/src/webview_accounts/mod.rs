@@ -275,7 +275,7 @@ fn is_provider_native_deep_link_scheme(scheme: &str) -> bool {
 /// `accounts.google.com` popups should be listed. Other providers
 /// continue to fall through to the default popup-handling path.
 fn provider_supports_google_sso(provider: &str) -> bool {
-    matches!(provider, "google-meet" | "slack")
+    matches!(provider, "google-meet" | "slack" | "zoom")
 }
 
 /// `true` if a popup request should be denied AND the parent webview
@@ -3800,11 +3800,11 @@ mod tests {
     fn provider_supports_google_sso_matrix() {
         assert!(provider_supports_google_sso("google-meet"));
         assert!(provider_supports_google_sso("slack"));
+        assert!(provider_supports_google_sso("zoom"));
         assert!(!provider_supports_google_sso("whatsapp"));
         assert!(!provider_supports_google_sso("telegram"));
         assert!(!provider_supports_google_sso("linkedin"));
         assert!(!provider_supports_google_sso("discord"));
-        assert!(!provider_supports_google_sso("zoom"));
         assert!(!provider_supports_google_sso("browserscan"));
         assert!(!provider_supports_google_sso(""));
         assert!(!provider_supports_google_sso("unknown-provider"));
