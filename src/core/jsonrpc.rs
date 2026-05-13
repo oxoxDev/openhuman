@@ -56,10 +56,9 @@ pub async fn rpc_handler(State(state): State<AppState>, Json(req): Json<RpcReque
                 .into_response()
         }
         Err(message) => {
-            // Session-expired bubbles up as an "error" but is an expected
-            // boundary condition (auth handler clears the local token and the
-            // UI re-auths). Don't spam Sentry with it.
-            if !is_session_expired_error(&message) {
+            // Session-expired and "session already active" bubble up as errors
+            // but are expected boundary conditions. Don't spam Sentry with them.
+            if !is_session_expired_error(&message) && !is_benign_si_error(&message) {
                 crate::core::observability::report_error(
                     message.as_str(),
                     "rpc",
@@ -144,6 +143,12 @@ fn is_session_expired_error(msg: &str) -> bool {
         || lower.contains("invalid token")
         || lower.contains("no backend session token")
         || msg.contains("SESSION_EXPIRED")
+}
+
+/// Helper to determine if an error message is a benign screen-intelligence failure
+/// that should not be reported to Sentry (e.g. session already active).
+fn is_benign_si_error(msg: &str) -> bool {
+    msg.contains("session already active")
 }
 
 /// Internal method invocation logic.

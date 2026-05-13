@@ -354,7 +354,11 @@ pub async fn start_if_enabled(app_config: &Config) {
 
     tokio::spawn(async move {
         if let Err(e) = server.run(&config_for_run).await {
-            error!("{LOG_PREFIX} embedded server exited with error: {e}");
+            if e.contains("session already active") {
+                info!("{LOG_PREFIX} embedded server session already active (benign)");
+            } else {
+                error!("{LOG_PREFIX} embedded server exited with error: {e}");
+            }
         }
     });
 }
