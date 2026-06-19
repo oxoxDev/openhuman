@@ -137,6 +137,26 @@ pub(crate) async fn run_turn_engine(
             "[agent_loop] effective context window unavailable (cloud unknown model); pre-dispatch trimming skipped this turn"
         ),
     }
+    let model_is_local_provider = provider.is_local_provider_for_model(model);
+    let local_prefix_guard_context_window = provider.local_prefix_guard_context_window(model).await;
+    match local_prefix_guard_context_window {
+        Some(context_window) => tracing::debug!(
+            provider = provider_name,
+            model,
+            context_window,
+            "[agent_loop] authoritative local prefix guard context window resolved"
+        ),
+        None if model_is_local_provider => tracing::debug!(
+            provider = provider_name,
+            model,
+            "[agent_loop] local provider has no authoritative prefix guard context window; hard prefix overflow guard skipped"
+        ),
+        None => tracing::trace!(
+            provider = provider_name,
+            model,
+            "[agent_loop] non-local provider; hard prefix overflow guard skipped"
+        ),
+    }
     let mut context_guard = effective_context_window
         .map(ContextGuard::with_context_window)
         .unwrap_or_else(ContextGuard::new);
@@ -260,6 +280,37 @@ pub(crate) async fn run_turn_engine(
                     ],
                 );
                 anyhow::bail!(msg);
+            }
+        }
+
+        // Run the hard local-prefix guard before any token-budget trim can
+        // remove the newest user turn and hide an `n_keep >= n_ctx` overflow.
+        if let Some(context_window) = local_prefix_guard_context_window {
+            if let Some(prefix_err) =
+                crate::openhuman::agent::harness::token_budget::unevictable_prefix_overflow(
+                    history,
+                    context_window,
+                )
+            {
+                log::warn!(
+                    "[agent_loop] un-evictable prefix overflows local context window — aborting pre-dispatch model={} context_window={} prefix_tokens={} max_input_tokens={}",
+                    model,
+                    context_window,
+                    prefix_err.prefix_tokens,
+                    prefix_err.max_input_tokens
+                );
+                crate::core::observability::report_error_or_expected(
+                    &prefix_err,
+                    "agent",
+                    "context_prefix_too_large",
+                    &[
+                        ("provider", provider_name),
+                        ("model", model),
+                        ("context_window", &context_window.to_string()),
+                        ("prefix_tokens", &prefix_err.prefix_tokens.to_string()),
+                    ],
+                );
+                return Err(prefix_err.into());
             }
         }
 
@@ -418,6 +469,41 @@ pub(crate) async fn run_turn_engine(
         // *original* marker text, not the rendered
         // [FILE-EXTRACTED]/[FILE-ATTACHED]/[IMAGE:data:…] blocks.
         let mut prepared_messages_vec = prepared_messages.messages;
+
+        // Pre-dispatch guard for the un-evictable-prefix overflow
+        // (TAURI-RUST-6V0 / #3550). Run this before post-multimodal trimming:
+        // the trimmer can remove an oversized newest user turn, which would
+        // mask the real `n_keep >= n_ctx` condition and dispatch a
+        // context-free system-only prompt.
+        if let Some(context_window) = local_prefix_guard_context_window {
+            if let Some(prefix_err) =
+                crate::openhuman::agent::harness::token_budget::unevictable_prefix_overflow(
+                    &prepared_messages_vec,
+                    context_window,
+                )
+            {
+                log::warn!(
+                    "[agent_loop] un-evictable prefix overflows local context window — aborting pre-dispatch model={} context_window={} prefix_tokens={} max_input_tokens={}",
+                    model,
+                    context_window,
+                    prefix_err.prefix_tokens,
+                    prefix_err.max_input_tokens
+                );
+                crate::core::observability::report_error_or_expected(
+                    &prefix_err,
+                    "agent",
+                    "context_prefix_too_large",
+                    &[
+                        ("provider", provider_name),
+                        ("model", model),
+                        ("context_window", &context_window.to_string()),
+                        ("prefix_tokens", &prefix_err.prefix_tokens.to_string()),
+                    ],
+                );
+                return Err(prefix_err.into());
+            }
+        }
+
         if let Some(context_window) = effective_context_window {
             let budget_outcome =
                 trim_chat_messages_to_budget(&mut prepared_messages_vec, context_window);
@@ -430,47 +516,6 @@ pub(crate) async fn run_turn_engine(
                     budget_outcome.final_tokens,
                     budget_outcome.messages_removed
                 );
-            }
-
-            // Pre-dispatch guard for the un-evictable-prefix overflow
-            // (TAURI-RUST-6V0 / #3550). Trimming above can only drop conversation
-            // history — never the system prefix or the current user turn. When a
-            // *local* model is loaded with a context window smaller than that
-            // un-evictable prefix (the runtime `n_keep >= n_ctx`), no amount of
-            // trimming can fit the prompt, so dispatching guarantees an opaque
-            // upstream `400`. Detect it here and surface the remedy the user
-            // actually controls — reload the model with a larger context length —
-            // instead of letting the cryptic provider error fly. This is an
-            // expected user-state condition (S3.5: preventable-user-state), so it
-            // is demoted from Sentry via `report_error_or_expected` (its Display
-            // string matches `is_context_window_exceeded_message`).
-            if provider.is_local_provider() {
-                if let Some(prefix_err) =
-                    crate::openhuman::agent::harness::token_budget::unevictable_prefix_overflow(
-                        &prepared_messages_vec,
-                        context_window,
-                    )
-                {
-                    log::warn!(
-                        "[agent_loop] un-evictable prefix overflows local context window — aborting pre-dispatch model={} context_window={} prefix_tokens={} max_input_tokens={}",
-                        model,
-                        context_window,
-                        prefix_err.prefix_tokens,
-                        prefix_err.max_input_tokens
-                    );
-                    crate::core::observability::report_error_or_expected(
-                        &prefix_err,
-                        "agent",
-                        "context_prefix_too_large",
-                        &[
-                            ("provider", provider_name),
-                            ("model", model),
-                            ("context_window", &context_window.to_string()),
-                            ("prefix_tokens", &prefix_err.prefix_tokens.to_string()),
-                        ],
-                    );
-                    return Err(prefix_err.into());
-                }
             }
         }
 
