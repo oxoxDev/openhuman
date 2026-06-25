@@ -15,7 +15,9 @@
 //!    into the user's Downloads directory with a non-colliding name and
 //!    returns the dest path so the UI can offer "Reveal in Finder".
 //!    Retained as the fallback the frontend uses when the dialog is
-//!    unavailable (e.g. no portal on headless Linux) or the user cancels.
+//!    unavailable (e.g. no portal on headless Linux). User cancellation
+//!    returns `Ok(None)` from the dialog and is treated as a no-op — it
+//!    does NOT trigger the Downloads fallback.
 //!    Cross-platform — previously macOS/Linux-only, un-gated so the
 //!    Save-As fallback works on Windows too.
 //!
@@ -103,10 +105,14 @@ fn assert_artifact_source(source: &Path, root: &Path) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("cannot resolve source path: {e}"))?;
     let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !canon_source.starts_with(&canon_root) {
-        return Err("source must be inside the OpenHuman data directory".to_string());
-    }
-    if !canon_source
+    // Check the `artifacts` component only on the path RELATIVE to the
+    // root — searching the absolute path would spuriously pass any file
+    // when the root (or an ancestor) itself happens to be named
+    // `artifacts`. strip_prefix also enforces containment. (CodeRabbit)
+    let rel_source = canon_source
+        .strip_prefix(&canon_root)
+        .map_err(|_| "source must be inside the OpenHuman data directory".to_string())?;
+    if !rel_source
         .components()
         .any(|c| c.as_os_str() == "artifacts")
     {
@@ -277,6 +283,19 @@ mod tests {
         let file = other.join("token.txt");
         std::fs::write(&file, b"x").unwrap();
         assert!(assert_artifact_source(&file, root).is_err());
+    }
+
+    #[test]
+    fn assert_artifact_source_ignores_artifacts_component_in_root_path() {
+        // The root itself contains an `artifacts` segment; a file under it
+        // that is NOT in an artifacts subtree must still be rejected.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("artifacts").join("openhuman");
+        let secrets = root.join("users/u1/secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        let file = secrets.join("token.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(assert_artifact_source(&file, &root).is_err());
     }
 
     #[test]
