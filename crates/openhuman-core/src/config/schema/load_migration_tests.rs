@@ -210,8 +210,10 @@ backend = "sqlite"
     let saved = tokio::fs::read_to_string(tmp.path().join("config.toml"))
         .await
         .unwrap();
-    assert!(saved.contains("engine = \"\""));
-    assert!(!saved.contains("backend"));
+    let saved: toml::Table = toml::from_str(&saved).unwrap();
+    let memory = saved["memory"].as_table().unwrap();
+    assert_eq!(memory.get("engine").and_then(toml::Value::as_str), Some(""));
+    assert!(!memory.contains_key("backend"));
 
     let reloaded = load_or_init_for_workspace(tmp.path()).await;
 
