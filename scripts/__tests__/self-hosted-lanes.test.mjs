@@ -499,3 +499,20 @@ test("peak RSS follows the process tree, including setsid'd descendants", () => 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a core-only change installs the node deps the mock backend needs before rust coverage", () => {
+  const coreOnly = { ...NONE, rustCore: true };
+  for (const plan of [
+    buildPlan({ profile: "ex63", areas: coreOnly, env: EX63_ENV }),
+    buildPlan({ profile: "hosted", areas: coreOnly }),
+  ]) {
+    const checks = plan.lanes.flatMap((l) => l.checks.map((c) => ({ lane: l.name, ...c })));
+    const coverage = checks.find((c) => c.name === "rust-core-coverage");
+    assert.ok(coverage?.when, plan.profile);
+    const install = coverage.needs.find((n) => n.endsWith("pnpm-install"));
+    assert.ok(install, `${plan.profile}: rust-core-coverage needs a pnpm install`);
+    const [lane, name] = install.includes(":") ? install.split(":") : [coverage.lane, install];
+    const step = checks.find((c) => c.lane === lane && c.name === name);
+    assert.ok(step?.when, `${plan.profile}: ${install} runs for a core-only change`);
+  }
+});
