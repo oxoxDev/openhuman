@@ -17,6 +17,8 @@ PRODUCT_FEATURES="$(bash scripts/ci/product-features.sh)"
 if command -v rustup >/dev/null 2>&1; then
   if COV_TOOLCHAIN_CARGO="$(rustup which cargo 2>/dev/null)"; then
     export PATH="$(dirname "$COV_TOOLCHAIN_CARGO"):$PATH"
+  else
+    echo "[ci][rust-cov] warning: rustup could not resolve the selected cargo (RUSTUP_HOME=${RUSTUP_HOME:-unset}); sandboxed tests keep the rustup proxy on PATH" >&2
   fi
 fi
 
