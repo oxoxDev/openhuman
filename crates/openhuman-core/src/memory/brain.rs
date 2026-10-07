@@ -248,7 +248,9 @@ pub async fn ingest(config: &Config, params: BrainIngestParams) -> MemoryResult<
     let ingested = brain(config)?
         .ingest_with(document, WriteOptions::accepted())
         .await?;
-    jobs::enqueue(config, layout(config).root(), vec![ingested.job]).await;
+    if let Some(job) = ingested.job {
+        jobs::enqueue(config, layout(config).root(), vec![job]).await;
+    }
     tracing::debug!(source = %filed, replayed = ingested.receipt.replayed, "[memory:brain] ingested");
     Ok(BrainIngestView {
         id: ingested.receipt.id.to_string(),
