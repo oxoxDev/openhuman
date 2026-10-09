@@ -710,9 +710,10 @@ pub fn all_tools_with_runtime(
         if !mcp_registry.is_empty() {
             tools.push(Box::new(McpListServersTool::new(Arc::clone(&mcp_registry))));
             tools.push(Box::new(McpListToolsTool::new(Arc::clone(&mcp_registry))));
-            tools.push(Box::new(mcp_call_tool(
-                Arc::clone(&mcp_registry),
-                security.clone(),
+            tools.push(Box::new(crate::mcp::ui::UiAwareTool::new(
+                Box::new(mcp_call_tool(Arc::clone(&mcp_registry), security.clone())),
+                crate::mcp::ui::decorate::MetaLookup::Configured(Arc::clone(&mcp_registry)),
+                crate::mcp::ui::decorate::ToolInput::Nested("arguments"),
             )));
             tracing::debug!(
                 count = mcp_registry.list().len(),
