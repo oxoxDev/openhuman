@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { widgetProxyUrl } from './widgetUrl';
+import { PROXY_FRAME_SANDBOX, widgetProxyUrl } from './widgetUrl';
 
 describe('widgetProxyUrl', () => {
   it('uses the platform origin and carries the declared origins', () => {
@@ -16,5 +16,15 @@ describe('widgetProxyUrl', () => {
     ).toBe(
       'http://ohwidget.localhost/proxy?connect=https%3A%2F%2Fapi.example.com&resource=https%3A%2F%2Fcdn.example.com'
     );
+  });
+});
+
+describe('PROXY_FRAME_SANDBOX', () => {
+  it('gives the proxy an origin a widget can post to, and nothing else', () => {
+    expect(PROXY_FRAME_SANDBOX.split(' ').sort()).toEqual([
+      'allow-forms',
+      'allow-same-origin',
+      'allow-scripts',
+    ]);
   });
 });

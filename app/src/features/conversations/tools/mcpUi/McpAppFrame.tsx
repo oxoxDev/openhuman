@@ -10,7 +10,7 @@ import { requestComposerPrefill } from './composerPrefill';
 import { QrHandoff } from './LinkActions';
 import { McpAppBridge } from './mcpAppBridge';
 import type { McpUiPresentation, McpUiResource } from './types';
-import { isWindowsHost, widgetProxyUrl } from './widgetUrl';
+import { isWindowsHost, PROXY_FRAME_SANDBOX, widgetProxyUrl } from './widgetUrl';
 
 const log = debug('mcp-ui:frame');
 
@@ -121,7 +121,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
           ref={frameRef}
           src={src}
           title={presentation.title ?? t('conversations.mcpUi.widgetTitle')}
-          sandbox="allow-scripts allow-forms"
+          sandbox={PROXY_FRAME_SANDBOX}
           referrerPolicy="no-referrer"
           allow=""
           className={
