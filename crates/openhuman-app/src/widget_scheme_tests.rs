@@ -46,18 +46,25 @@ fn proxy_opens_only_declared_https_origins() {
 
 #[test]
 fn unknown_paths_and_methods_are_refused() {
-    assert_eq!(get("ohwidget://localhost/other").status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        get("ohwidget://localhost/other").status(),
+        StatusCode::NOT_FOUND
+    );
     let request = Request::builder()
         .method("POST")
         .uri("ohwidget://localhost/proxy")
         .body(Vec::new())
         .unwrap();
-    assert_eq!(response_for(&request).status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        response_for(&request).status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
 }
 
 #[test]
 fn csp_semicolons_cannot_be_injected() {
-    let response = get("ohwidget://localhost/proxy?connect=https%3A%2F%2Fa.example.com%3B%20script-src%20*");
+    let response =
+        get("ohwidget://localhost/proxy?connect=https%3A%2F%2Fa.example.com%3B%20script-src%20*");
     let csp = csp_of(&response);
     assert!(!csp.contains("script-src *"));
 }

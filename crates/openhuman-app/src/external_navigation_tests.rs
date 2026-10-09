@@ -86,7 +86,12 @@ fn other_webviews_are_left_to_their_own_handlers() {
 #[test]
 fn widget_sandbox_origin_stays_in_the_main_webview() {
     assert_eq!(
-        navigation_handoff("main", &url("http://ohwidget.localhost/proxy"), "http", None),
+        navigation_handoff(
+            "main",
+            &url("http://ohwidget.localhost/proxy"),
+            "http",
+            None
+        ),
         None
     );
     assert_eq!(
