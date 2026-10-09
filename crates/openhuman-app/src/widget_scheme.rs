@@ -34,7 +34,7 @@ fn declared_origins(query: &str) -> (Vec<String>, Vec<String>) {
         }
     }
     let reduce = |items: Vec<Value>| {
-        openhuman_core::mcp::ui::resolve::https_origins(Some(&Value::Array(items)))
+        tinymcp::ui::https_origins(Some(&Value::Array(items)))
     };
     (reduce(connect), reduce(resource))
 }

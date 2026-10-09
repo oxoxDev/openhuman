@@ -4565,6 +4565,7 @@ dependencies = [
  "tinybox-docker",
  "tinybox-host",
  "tinybox-ssh",
+ "tinymcp",
  "tokio",
  "tokio-util",
  "toml 0.8.2",
