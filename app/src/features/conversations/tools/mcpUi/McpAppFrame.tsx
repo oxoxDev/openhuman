@@ -19,7 +19,7 @@ const DEFAULT_HEIGHT = 360;
 interface PendingCall {
   name: string;
   args: Record<string, unknown>;
-  resolve: (value: unknown) => void;
+  resolve: () => void;
   reject: (error: Error) => void;
 }
 
@@ -39,6 +39,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
   const [height, setHeight] = useState(DEFAULT_HEIGHT);
   const [pending, setPending] = useState<PendingCall | null>(null);
   const [handoffUrl, setHandoffUrl] = useState<string | null>(null);
+  const decisionsRef = useRef(new Map<string, Promise<void>>());
   const serverId = presentation.server_id;
 
   useEffect(() => {
@@ -80,9 +81,15 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
           if (!serverId) throw new Error('No server for this view');
           const first = await mcpUiApi.toolCall(serverId, name, args, false);
           if (!first.requires_confirmation) return first.result;
-          await new Promise<unknown>((resolve, reject) =>
-            setPending({ name, args, resolve, reject })
-          );
+          let decision = decisionsRef.current.get(name);
+          if (!decision) {
+            decision = new Promise<void>((resolve, reject) =>
+              setPending({ name, args, resolve, reject })
+            );
+            decision.catch(() => undefined);
+            decisionsRef.current.set(name, decision);
+          }
+          await decision;
           const confirmed = await mcpUiApi.toolCall(serverId, name, args, true);
           return confirmed.result;
         },
@@ -154,7 +161,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
           cancelLabel={t('conversations.mcpUi.confirmDeny')}
           testId="mcp-ui-confirm"
           onConfirm={() => {
-            pending.resolve(undefined);
+            pending.resolve();
             setPending(null);
           }}
           onCancel={() => {
