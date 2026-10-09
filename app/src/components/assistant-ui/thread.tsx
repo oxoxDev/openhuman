@@ -30,6 +30,7 @@ import {
   useAuiEditCapabilities,
   useAuiReloadCapability,
 } from '@/features/conversations/components/aui/auiThreadState';
+import { onComposerPrefill } from '@/features/conversations/tools/mcpUi/composerPrefill';
 import { useT } from '@/lib/i18n/I18nContext';
 import { useAuiThreadId } from '@/providers/AssistantUiRuntimeProvider';
 import { CHAT_ERROR_METADATA_KEY } from '@/store/threadSlice';
@@ -1020,6 +1021,8 @@ const Composer: FC<{
   // composition before it runs. That stale write would rebuild the editor
   // mid-composition and cancel it -- #5763 again, one composition later.
   const isComposingTextRef = useRef(false);
+
+  useEffect(() => onComposerPrefill(text => aui.composer.setText(text)), [aui]);
   // ArrowUp recall only fires on an empty composer, so a caret move inside a
   // multi-line draft is never hijacked.
   const composerIsEmpty = useAuiState(state => state.composer.text.length === 0);
