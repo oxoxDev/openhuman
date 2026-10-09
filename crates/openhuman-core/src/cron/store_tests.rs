@@ -122,3 +122,23 @@ async fn a_job_whose_agent_is_not_live_stays_dormant() {
         "nothing ran the dormant agent's job"
     );
 }
+
+#[test]
+fn a_snapshotted_agent_runs_only_while_the_registry_still_maps_it() {
+    use crate::core::runtime::AgentContextRegistry;
+    let tmp = TempDir::new().unwrap();
+    let config = test_config(&tmp);
+    let ctx = agent_context(&config, "tick-recheck");
+    let replacement = agent_context(&config, "tick-recheck");
+
+    assert!(!crate::cron::scheduler::is_registered("tick-recheck", &ctx));
+    AgentContextRegistry::register("tick-recheck", &ctx);
+    assert!(crate::cron::scheduler::is_registered("tick-recheck", &ctx));
+    assert!(!crate::cron::scheduler::is_registered(
+        "tick-recheck",
+        &replacement
+    ));
+
+    AgentContextRegistry::deregister("tick-recheck", &ctx);
+    assert!(!crate::cron::scheduler::is_registered("tick-recheck", &ctx));
+}

@@ -79,12 +79,21 @@ pub async fn run(config: Config) -> Result<()> {
     }
 }
 
+pub(crate) fn is_registered(agent_id: &str, ctx: &Arc<crate::core::runtime::CoreContext>) -> bool {
+    crate::core::runtime::AgentContextRegistry::get(agent_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, ctx))
+}
+
 /// Runs the due jobs of every live embedded agent, each under that agent's
 /// own context: its config, provider route, policy and job database. An
 /// agent that is not live has no context to run under, so its jobs stay
 /// dormant until it is instantiated again.
 pub(crate) async fn tick_live_agents() {
     for (agent_id, ctx) in crate::core::runtime::AgentContextRegistry::live() {
+        if !is_registered(&agent_id, &ctx) {
+            tracing::debug!(agent = %agent_id, "[cron:scheduler] agent removed mid-tick; skipped");
+            continue;
+        }
         let agent = agent_id.clone();
         crate::core::runtime::CoreContext::scope(ctx, async move {
             let config = match crate::config::ops::load_current_or_init().await {
