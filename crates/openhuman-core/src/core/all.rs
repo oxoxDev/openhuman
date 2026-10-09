@@ -365,6 +365,12 @@ fn build_registered_controllers() -> Vec<GroupedController> {
         DomainGroup::Mcp,
         crate::mcp::registry::all_mcp_registry_registered_controllers(),
     );
+    #[cfg(feature = "mcp")]
+    push(
+        &mut controllers,
+        DomainGroup::Mcp,
+        crate::mcp::ui::all_mcp_ui_registered_controllers(),
+    );
     // Agent definition and prompt inspection
     push(
         &mut controllers,
@@ -836,6 +842,9 @@ pub fn namespace_description(namespace: &str) -> Option<&'static str> {
         ),
         "mcp_clients" => Some(
             "Browse the MCP registries, declare the user's servers in one mcp.json document, manage their connections and credentials, and expose their tools to the agent.",
+        ),
+        "mcp_ui" => Some(
+            "Serve tool-provided widgets their documents and run the tool calls a widget asks for, under the agent's tool policy.",
         ),
         "decrypt" => Some("Decrypt secure values managed by secret storage."),
         "doctor" => Some("Run diagnostics for workspace and runtime health."),

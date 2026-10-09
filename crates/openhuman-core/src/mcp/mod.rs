@@ -154,6 +154,8 @@ pub mod audit;
 pub mod host;
 pub mod registry;
 pub mod server;
+#[cfg(feature = "mcp")]
+pub mod ui;
 
 /// The Streamable HTTP transport, from the wire contract's implementation.
 ///
