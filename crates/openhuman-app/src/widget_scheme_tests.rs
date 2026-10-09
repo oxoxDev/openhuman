@@ -77,9 +77,9 @@ fn widget_frame_cannot_be_navigated_to_a_remote_page() {
 #[test]
 fn proxy_sandbox_grants_no_navigation_or_popups() {
     let sandbox = PROXY_HTML
-        .split("setAttribute('sandbox', '")
+        .split("setAttribute(\"sandbox\", \"")
         .nth(1)
-        .and_then(|rest| rest.split('\'').next())
+        .and_then(|rest| rest.split('"').next())
         .unwrap();
     assert_eq!(sandbox, "allow-scripts allow-forms");
     assert!(!PROXY_HTML.contains("allow-same-origin"));
