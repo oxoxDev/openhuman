@@ -29,6 +29,9 @@
         var host = window.parent;
         if (!host || host === window) return;
         var inner = null;
+        var theme = new URLSearchParams(location.search).get("theme");
+        if (theme !== "light" && theme !== "dark") theme = "";
+        if (theme) document.documentElement.style.colorScheme = theme;
 
         function isRpc(data) {
           return (
@@ -44,6 +47,8 @@
           inner.setAttribute("sandbox", "allow-scripts allow-forms");
           inner.setAttribute("referrerpolicy", "no-referrer");
           inner.setAttribute("title", "widget");
+          inner.setAttribute("allowtransparency", "true");
+          if (theme) inner.style.colorScheme = theme;
           inner.srcdoc = html;
           document.body.appendChild(inner);
         }
