@@ -116,7 +116,9 @@ pub(crate) async fn refresh_configured_tool_cache(config: &crate::config::Config
     for (server, outcome) in registry.refresh_tool_cache(service.dynamic().store()).await {
         match outcome {
             Ok(count) => {
-                tracing::debug!(server = %server, tools = count, "[mcp] refreshed configured tool cache")
+                tracing::debug!(server = %server, tools = count, "[mcp] refreshed configured tool cache");
+                ui::discovery::log_configured_server(&registry, service.dynamic().store(), &server)
+                    .await;
             }
             Err(error) => {
                 tracing::debug!(server = %server, "[mcp] configured tool cache not refreshed: {error}")

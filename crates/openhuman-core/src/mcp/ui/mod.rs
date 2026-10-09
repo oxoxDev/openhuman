@@ -13,6 +13,7 @@
 
 pub mod cache;
 pub mod decorate;
+pub mod discovery;
 pub mod links;
 pub mod ops;
 pub mod port;
