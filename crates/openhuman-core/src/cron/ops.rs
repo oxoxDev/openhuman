@@ -12,20 +12,29 @@ use std::sync::Mutex;
 
 /// Guard against duplicate concurrent "Run Now" executions per job.
 /// Entries are inserted before spawning and removed when the task completes.
-static ACTIVE_RUNS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+type RunKey = (Option<String>, String);
+
+fn run_key(job_id: &str) -> RunKey {
+    (
+        crate::core::runtime::agent_scope::current_agent_id(),
+        job_id.to_string(),
+    )
+}
+
+static ACTIVE_RUNS: Lazy<Mutex<HashSet<RunKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// RAII guard that removes a job ID from `ACTIVE_RUNS` when dropped.
 ///
 /// Ensures cleanup runs on normal completion, panic, or future cancellation —
 /// so a hung or aborted background task can never permanently lock a job_id.
 pub(crate) struct ActiveRunGuard {
-    job_id: String,
+    key: RunKey,
 }
 
 impl Drop for ActiveRunGuard {
     fn drop(&mut self) {
         if let Ok(mut active) = ACTIVE_RUNS.lock() {
-            active.remove(&self.job_id);
+            active.remove(&self.key);
         }
     }
 }
@@ -33,13 +42,12 @@ impl Drop for ActiveRunGuard {
 /// Claim `job_id` as running. `None` when a run (scheduled or Run Now) already
 /// holds it; the claim is released when the guard drops.
 pub(crate) fn try_acquire_run(job_id: &str) -> Option<ActiveRunGuard> {
+    let key = run_key(job_id);
     let mut active = ACTIVE_RUNS.lock().ok()?;
-    if !active.insert(job_id.to_string()) {
+    if !active.insert(key.clone()) {
         return None;
     }
-    Some(ActiveRunGuard {
-        job_id: job_id.to_string(),
-    })
+    Some(ActiveRunGuard { key })
 }
 
 pub fn add_once(config: &Config, delay: &str, command: &str) -> Result<CronJob> {
@@ -226,23 +234,24 @@ pub async fn cron_run(config: &Config, job_id: &str) -> Result<Outcome<serde_jso
         return Err("cron is disabled by config (cron.enabled=false)".to_string());
     }
 
+    let key = run_key(job_id);
     // Guard against duplicate concurrent executions for the same job.
     {
         let mut active = ACTIVE_RUNS
             .lock()
             .map_err(|_| "ACTIVE_RUNS lock poisoned".to_string())?;
-        if active.contains(job_id) {
+        if active.contains(&key) {
             tracing::debug!(job_id, "[cron_run] rejected duplicate concurrent execution");
             return Err(format!("cron job '{job_id}' is already running"));
         }
-        active.insert(job_id.to_string());
+        active.insert(key.clone());
     }
 
     let job = match cron::get_job(config, job_id) {
         Ok(j) => j,
         Err(e) => {
             if let Ok(mut active) = ACTIVE_RUNS.lock() {
-                active.remove(job_id);
+                active.remove(&key);
             }
             return Err(e.to_string());
         }
@@ -264,9 +273,7 @@ pub async fn cron_run(config: &Config, job_id: &str) -> Result<Outcome<serde_jso
     tokio::spawn(async move {
         // Drop guard ensures job_id is removed from ACTIVE_RUNS even on panic
         // or future cancellation, not just on the normal completion path.
-        let _guard = ActiveRunGuard {
-            job_id: job_id_owned.clone(),
-        };
+        let _guard = ActiveRunGuard { key };
 
         tracing::debug!(job_id = %job_id_owned, "[cron_run] background task started");
 

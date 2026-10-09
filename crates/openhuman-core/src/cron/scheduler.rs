@@ -227,7 +227,12 @@ async fn process_due_jobs(config: &Config, security: &Arc<SecurityPolicy>, jobs:
     }))
     .buffer_unordered(max_concurrent);
 
+    let publishes_workspace_health =
+        crate::core::runtime::agent_scope::current_agent_id().is_none();
     while let Some((job_id, success, failure_message)) = in_flight.next().await {
+        if !publishes_workspace_health {
+            continue;
+        }
         if success {
             BUS.publish(DomainEvent::HealthChanged {
                 component: "scheduler".to_string(),

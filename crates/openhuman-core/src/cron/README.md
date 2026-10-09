@@ -55,7 +55,8 @@ jobs, the turn's message id.
 
 ### Run claims
 
-[`ops.rs`](./ops.rs) keeps a process-wide `ACTIVE_RUNS` set. The poll loop claims each due
+[`ops.rs`](./ops.rs) keeps a process-wide `ACTIVE_RUNS` set keyed by (agent id, job id), so two agents
+with the same job id never block each other. The poll loop claims each due
 job through `try_acquire_run`, which returns an `ActiveRunGuard` that releases
 the claim on drop (including panic and cancellation). The `cron.run` "Run Now"
 RPC uses the same set and rejects a second concurrent run of one job. A job

@@ -536,12 +536,31 @@ async fn cron_run_rejects_duplicate_concurrent_execution() {
 
     // Seed ACTIVE_RUNS directly to simulate an in-flight execution without
     // spawning a real long-running subprocess (deterministic, no timing dependency).
-    ACTIVE_RUNS.lock().unwrap().insert(job.id.clone());
+    ACTIVE_RUNS.lock().unwrap().insert((None, job.id.clone()));
     let err = cron_run(&config, &job.id).await.unwrap_err();
-    ACTIVE_RUNS.lock().unwrap().remove(&job.id);
+    ACTIVE_RUNS.lock().unwrap().remove(&(None, job.id.clone()));
 
     assert!(
         err.contains("already running"),
         "expected 'already running', got: {err}"
     );
+}
+
+#[tokio::test]
+async fn run_claims_are_scoped_to_the_agent() {
+    use crate::core::runtime::agent_scope::test_agent_context;
+    use crate::core::runtime::{context::CoreContext, DomainSet};
+    let root = CoreContext::for_test(DomainSet::full(), None);
+    let alpha = test_agent_context(&root, "alpha");
+    let beta = test_agent_context(&root, "beta");
+
+    let alpha_claim =
+        CoreContext::scope(alpha.clone(), async { try_acquire_run("shared-job-id") }).await;
+    assert!(alpha_claim.is_some());
+
+    let beta_claim = CoreContext::scope(beta, async { try_acquire_run("shared-job-id") }).await;
+    assert!(beta_claim.is_some(), "another agent's claim must not block");
+
+    let alpha_again = CoreContext::scope(alpha, async { try_acquire_run("shared-job-id") }).await;
+    assert!(alpha_again.is_none(), "the same agent is still excluded");
 }
