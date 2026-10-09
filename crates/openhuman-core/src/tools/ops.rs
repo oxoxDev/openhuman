@@ -570,11 +570,6 @@ pub fn all_tools_with_runtime(
         tracing::debug!("[tools::ops] memory off; memory tool not registered");
     }
 
-    #[cfg(feature = "mcp")]
-    tools.push(Box::new(crate::mcp::ui::ShowUiTool::for_config(
-        root_config,
-    )));
-
     // `juice_find` / `juice_extract` / `juice_summarize`: only while a handle can name them.
     tools.extend(crate::inference::tokenjuice::repl_tools_for(root_config));
 
@@ -700,6 +695,7 @@ pub fn all_tools_with_runtime(
     // feature; see the static-vs-dynamic note in AGENTS.md.
     #[cfg(feature = "mcp")]
     {
+        tools.push(crate::mcp::ui::show_ui_tool(root_config));
         let mcp_registry = {
             // Built from the converted configuration, which is the one place
             // the two vocabularies meet. A registry that cannot be built is
@@ -715,11 +711,8 @@ pub fn all_tools_with_runtime(
         if !mcp_registry.is_empty() {
             tools.push(Box::new(McpListServersTool::new(Arc::clone(&mcp_registry))));
             tools.push(Box::new(McpListToolsTool::new(Arc::clone(&mcp_registry))));
-            tools.push(Box::new(crate::mcp::ui::UiAwareTool::new(
-                Box::new(mcp_call_tool(Arc::clone(&mcp_registry), security.clone())),
-                crate::mcp::ui::decorate::MetaLookup::Configured(Arc::clone(&mcp_registry)),
-                crate::mcp::ui::decorate::ToolInput::Nested("arguments"),
-            )));
+            let call = Box::new(mcp_call_tool(Arc::clone(&mcp_registry), security.clone()));
+            tools.push(crate::mcp::ui::ui_aware_call(call, &mcp_registry));
             tracing::debug!(
                 count = mcp_registry.list().len(),
                 "[mcp_client] registered generic MCP bridge tools"

@@ -149,6 +149,16 @@ fn spawn_reconnect_supervisor() {
 #[cfg(not(feature = "mcp"))]
 pub fn start_boot_jobs(_config: &crate::config::Config) {}
 
+/// Every `mcp_*` controller this build serves: the client registry and, with
+/// the `mcp` feature, tool UI.
+pub fn all_registered_controllers() -> Vec<crate::core::all::RegisteredController> {
+    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    let mut controllers = registry::all_mcp_registry_registered_controllers();
+    #[cfg(feature = "mcp")]
+    controllers.extend(ui::all_mcp_ui_registered_controllers());
+    controllers
+}
+
 pub mod audit;
 // Ungated, like the transport below and for the same reason: `tinymcp` is an
 // ordinary dependency, and the startup path calls `host::init` without a `cfg`
