@@ -11,6 +11,7 @@ import debug from 'debug';
 
 import { classifyHref } from '../../utils/format';
 import { APPS_SDK_SHIM_SOURCE, injectScript } from './appsSdkShim';
+import { frameFitSource } from './frameFit';
 import { SCROLL_AFFORDANCE_SOURCE } from './scrollAffordance';
 import type { McpUiPresentation } from './types';
 
@@ -40,6 +41,8 @@ export interface BridgeHandlers {
   readResource(uri: string): Promise<unknown>;
   /** The widget asked for this content height. */
   resize(height: number): void;
+  /** The widget's content uses this width. */
+  fitWidth(width: number): void;
 }
 
 export interface BridgeOptions {
@@ -185,6 +188,11 @@ export class McpAppBridge {
         this.sendToolData();
         return;
       case 'ui/notifications/size-changed': {
+        if (params.fit === true) {
+          const width = Number(params.width);
+          if (Number.isFinite(width) && width > 0) this.options.handlers.fitWidth(Math.ceil(width));
+          return;
+        }
         const height = Number(params.height);
         if (Number.isFinite(height) && height > 0) {
           this.options.handlers.resize(
@@ -201,7 +209,10 @@ export class McpAppBridge {
   private deliverDocument(): void {
     if (this.delivered) return;
     this.delivered = true;
-    const withAffordance = injectScript(this.options.html, SCROLL_AFFORDANCE_SOURCE);
+    const withAffordance = injectScript(
+      injectScript(this.options.html, SCROLL_AFFORDANCE_SOURCE),
+      frameFitSource(this.options.theme)
+    );
     const html =
       this.flavor === 'apps_sdk'
         ? injectScript(withAffordance, APPS_SDK_SHIM_SOURCE)

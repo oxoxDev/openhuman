@@ -114,3 +114,17 @@ describe('McpAppFrame tool decisions', () => {
     expect(bridges.updates.at(-1)).toEqual({ q: 2 });
   });
 });
+
+describe('McpAppFrame sizing', () => {
+  it('fills the column, then fits the reported content width, left-aligned', async () => {
+    const { handlers } = await mountFrame();
+    const frame = screen.getByTestId('mcp-ui-iframe');
+    expect(frame.style.width).toBe('100%');
+    expect(frame.getAttribute('allowtransparency')).toBe('true');
+    expect(frame.getAttribute('src')).toContain('theme=light');
+    expect(frame.className).toContain('self-start');
+
+    act(() => handlers.fitWidth(480));
+    expect(frame.style.width).toBe('488px');
+  });
+});

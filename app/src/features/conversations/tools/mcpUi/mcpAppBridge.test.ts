@@ -26,6 +26,7 @@ function setup(
     prefillMessage: vi.fn(),
     readResource: vi.fn(async () => ({ contents: [] })),
     resize: vi.fn(),
+    fitWidth: vi.fn(),
     ...handlerOverrides,
   };
   let clock = 0;
@@ -83,12 +84,14 @@ describe('McpAppBridge', () => {
     expect(html.endsWith('</head><body>cart</body></html>')).toBe(true);
   });
 
-  it('injects the scroll affordance for both flavors, the shim only for Apps SDK', () => {
+  it('injects the host scripts for both flavors, the shim only for Apps SDK', () => {
     for (const flavor of ['mcp_apps', 'apps_sdk'] as const) {
       const { send, posted } = setup({ flavor });
       send({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready' });
       const html = (posted[0].params as { html: string }).html;
       expect(html).toContain(SCROLL_AFFORDANCE_SOURCE.slice(0, 40));
+      expect(html).toContain('html,body{background:transparent!important;}');
+      expect(html).toContain("var THEME = 'dark';");
       expect(html.includes('window.openai')).toBe(flavor === 'apps_sdk');
       expect(html.lastIndexOf('</script>')).toBeLessThan(html.indexOf('cart'));
     }
@@ -250,6 +253,32 @@ describe('McpAppBridge', () => {
     const { send, handlers } = setup();
     send({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height: 99999 } });
     expect(handlers.resize).toHaveBeenCalledWith(MAX_FRAME_HEIGHT);
+  });
+
+  it('takes width only from the host fit report, height only from the widget', () => {
+    const { send, handlers } = setup();
+    send({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/size-changed',
+      params: { width: 480.4, height: 900, fit: true },
+    });
+    expect(handlers.fitWidth).toHaveBeenCalledWith(481);
+    expect(handlers.resize).not.toHaveBeenCalled();
+
+    send({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/size-changed',
+      params: { width: 300, height: 200 },
+    });
+    expect(handlers.fitWidth).toHaveBeenCalledTimes(1);
+    expect(handlers.resize).toHaveBeenCalledWith(200);
+
+    send({
+      jsonrpc: '2.0',
+      method: 'ui/notifications/size-changed',
+      params: { width: 'x', fit: true },
+    });
+    expect(handlers.fitWidth).toHaveBeenCalledTimes(1);
   });
 
   it('rejects unknown requests', async () => {

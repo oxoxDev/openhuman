@@ -10,7 +10,7 @@ import { requestComposerPrefill } from './composerPrefill';
 import { QrHandoff } from './LinkActions';
 import { McpAppBridge } from './mcpAppBridge';
 import type { McpUiPresentation, McpUiResource } from './types';
-import { isWindowsHost, PROXY_FRAME_SANDBOX, widgetProxyUrl } from './widgetUrl';
+import { frameWidth, isWindowsHost, PROXY_FRAME_SANDBOX, widgetProxyUrl } from './widgetUrl';
 
 const log = debug('mcp-ui:frame');
 
@@ -37,6 +37,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [state, setState] = useState<LoadState>({ status: 'loading' });
   const [height, setHeight] = useState(DEFAULT_HEIGHT);
+  const [contentWidth, setContentWidth] = useState<number | null>(null);
   const [pending, setPending] = useState<PendingCall | null>(null);
   const [handoffUrl, setHandoffUrl] = useState<string | null>(null);
   const decisionsRef = useRef(new Map<string, Promise<void>>());
@@ -70,9 +71,10 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
   }, [serverId, presentation.resource_uri, presentation.inline_id]);
 
   const resource = state.status === 'ready' ? state.resource : null;
+  const theme = useMemo(() => (resource ? currentTheme() : null), [resource]);
   const src = useMemo(
-    () => (resource ? widgetProxyUrl(resource.csp, isWindowsHost()) : null),
-    [resource]
+    () => (resource && theme ? widgetProxyUrl(resource.csp, isWindowsHost(), theme) : null),
+    [resource, theme]
   );
 
   useEffect(() => {
@@ -80,7 +82,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
     const bridge = new McpAppBridge({
       presentation: presentationRef.current,
       html: resource.html,
-      theme: currentTheme(),
+      theme: theme ?? currentTheme(),
       locale,
       source: () => frameRef.current?.contentWindow,
       handlers: {
@@ -109,6 +111,10 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
           return { contents: [{ uri, mimeType: read.mime_type, text: read.html }] };
         },
         resize: next => setHeight(next),
+        fitWidth: next => {
+          log('content width %d', next);
+          setContentWidth(next);
+        },
       },
     });
     bridgeRef.current = bridge;
@@ -120,7 +126,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
       window.removeEventListener('message', onMessage);
       if (bridgeRef.current === bridge) bridgeRef.current = null;
     };
-  }, [resource, serverId, locale]);
+  }, [resource, theme, serverId, locale]);
 
   if (state.status === 'unavailable') {
     return (
@@ -144,10 +150,11 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
           allow=""
           className={
             resource?.prefers_border
-              ? 'w-full rounded-lg border border-line bg-transparent'
-              : 'w-full bg-transparent'
+              ? 'max-w-full self-start rounded-lg border border-line bg-transparent'
+              : 'max-w-full self-start bg-transparent'
           }
-          style={{ height }}
+          style={{ height, width: frameWidth(contentWidth), colorScheme: theme ?? undefined }}
+          {...{ allowtransparency: 'true' }}
           data-testid="mcp-ui-iframe"
         />
       )}
