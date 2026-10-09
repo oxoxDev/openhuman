@@ -107,9 +107,10 @@ export const SCROLL_AFFORDANCE_SOURCE = `(function () {
     button.setAttribute('aria-label', label);
     button.innerHTML = icon;
     button.style.cssText = 'position:fixed;display:none;align-items:center;justify-content:center;' +
-      'width:' + SIZE + 'px;height:' + SIZE + 'px;padding:0;margin:0;border-radius:50%;' +
+      'width:' + SIZE + 'px;height:' + SIZE + 'px;padding:0;margin:0;' +
       'border:1px solid rgba(0,0,0,0.14);background:rgba(255,255,255,0.94);color:#1f2328;' +
       'box-shadow:0 1px 4px rgba(0,0,0,0.22);cursor:pointer;font:inherit;line-height:0;';
+    button.style.borderRadius = '50%';
     button.addEventListener('click', function () {
       var amount = Math.max(1, Math.round(el.clientWidth * 0.8)) * direction;
       if (typeof el.scrollBy === 'function') {

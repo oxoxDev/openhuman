@@ -88,7 +88,7 @@ const FRAME_FIT_TEMPLATE = `(function () {
     }
     var maxWidth = cs.maxWidth === 'none' ? 0 : px(cs.maxWidth);
     if (maxWidth > 0) {
-      if (cs.boxSizing !== 'border-box') {
+      if (cs.boxSizing.slice(0, 6) !== 'border') {
         maxWidth += px(cs.paddingLeft) + px(cs.paddingRight) +
           px(cs.borderLeftWidth) + px(cs.borderRightWidth);
       }
