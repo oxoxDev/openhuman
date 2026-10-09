@@ -15,8 +15,8 @@ use openhuman_core::core::events::DomainEvent;
 use openhuman_core::core::runtime::AgentContextRegistry;
 use openhuman_core::security::AutonomyLevel;
 use openhuman_embed::{
-    Access, Agent, AgentDefinitionSpec, AgentError, AgentSpec, AgentTurnOrigin, CoreError, Runtime,
-    ToolScopeSpec, TrustedAccess, Workspace,
+    Access, Agent, AgentDefinitionSpec, AgentError, AgentSpec, AgentTurnOrigin, ApprovalDecision,
+    ApprovalsError, CoreError, Runtime, ToolScopeSpec, TrustedAccess, Workspace,
 };
 
 fn supervised(scratch: &std::path::Path) -> Access {
@@ -227,6 +227,44 @@ fn removing_an_agent_releases_everything_it_held() {
                 .expect("purged is removed");
             assert!(!home.exists(), "purge deleted {}", home.display());
             drop(purged);
+
+            // ── a handle to a removed agent never reaches its successor ──
+            let (first, _first_provider) = parking_agent(&runtime, "phoenix", scratch.path()).await;
+            let stale = first.approvals();
+            runtime
+                .remove_agent("phoenix")
+                .await
+                .expect("phoenix is removed");
+            drop(first);
+            let (second, _second_provider) =
+                parking_agent(&runtime, "phoenix", scratch.path()).await;
+            let turn = {
+                let second = second.clone();
+                tokio::spawn(async move { second.turn("write the marker").send().await })
+            };
+            let parked = eventually("the successor to park", || {
+                second
+                    .approvals()
+                    .pending()
+                    .ok()
+                    .and_then(|rows| rows.into_iter().next())
+            })
+            .await;
+            assert!(stale.pending().unwrap().is_empty());
+            let refused = stale
+                .decide(&parked.request_id, ApprovalDecision::ApproveOnce)
+                .expect_err("a stale handle cannot decide");
+            assert!(
+                matches!(refused, ApprovalsError::NotFound(_)),
+                "{refused:?}"
+            );
+            assert_eq!(second.approvals().pending().unwrap().len(), 1);
+            runtime
+                .remove_agent("phoenix")
+                .await
+                .expect("phoenix is removed again");
+            removed(turn.await.expect("turn task"), "phoenix");
+            drop(second);
 
             // ── the cap counts live agents only ──
             let cap_provider = provider("capped").await;

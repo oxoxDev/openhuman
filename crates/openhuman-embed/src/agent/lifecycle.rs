@@ -31,6 +31,10 @@ impl Lifecycle {
         self.removed.send_replace(true);
     }
 
+    pub(crate) fn is_removed(&self) -> bool {
+        *self.removed.borrow()
+    }
+
     /// Runs `turn` unless the agent was removed, ending it early with
     /// [`CoreError::AgentRemoved`] if the agent is removed meanwhile.
     pub(crate) async fn admit<T>(

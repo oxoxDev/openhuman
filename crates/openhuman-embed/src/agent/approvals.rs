@@ -4,6 +4,8 @@
 //! every agent on the runtime. Each request records the agent that parked it,
 //! and an [`Approvals`] handle lists and decides only its own agent's.
 
+use std::sync::{Arc, Weak};
+
 use openhuman_core::security::approval::{ApprovalError, ApprovalGate};
 
 pub use openhuman_core::security::approval::{ApprovalDecision, PendingApproval};
@@ -31,18 +33,30 @@ pub enum ApprovalsError {
 #[derive(Debug, Clone)]
 pub struct Approvals {
     agent_id: String,
+    agent: Weak<super::AgentInner>,
 }
 
 impl Approvals {
-    pub(crate) fn new(agent_id: &str) -> Self {
+    pub(crate) fn new(agent: &Arc<super::AgentInner>) -> Self {
         Self {
-            agent_id: agent_id.to_string(),
+            agent_id: agent.id.clone(),
+            agent: Arc::downgrade(agent),
         }
     }
 
+    fn is_current(&self) -> bool {
+        self.agent
+            .upgrade()
+            .is_some_and(|agent| !agent.lifecycle.is_removed())
+    }
+
     /// The agent's undecided requests, oldest first. Empty when the runtime
-    /// has no approval gate.
+    /// has no approval gate, or when the agent was removed: a handle never
+    /// reaches a later agent that reuses the id.
     pub fn pending(&self) -> Result<Vec<PendingApproval>, ApprovalsError> {
+        if !self.is_current() {
+            return Ok(Vec::new());
+        }
         let Some(gate) = ApprovalGate::try_global() else {
             return Ok(Vec::new());
         };
@@ -60,6 +74,9 @@ impl Approvals {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<PendingApproval, ApprovalsError> {
+        if !self.is_current() {
+            return Err(ApprovalsError::NotFound(request_id.to_string()));
+        }
         let gate = ApprovalGate::try_global().ok_or(ApprovalsError::GateNotInstalled)?;
         log::debug!(
             "[embed][approvals] agent={} decide request_id={request_id} decision={}",

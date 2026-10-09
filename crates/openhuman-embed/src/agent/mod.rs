@@ -222,7 +222,7 @@ impl Agent {
     /// This agent's pending approvals: the requests its turns parked, and
     /// only those.
     pub fn approvals(&self) -> Approvals {
-        Approvals::new(&self.inner.id)
+        Approvals::new(&self.inner)
     }
 
     /// The agent's read/write root for acting tools.
