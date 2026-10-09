@@ -80,3 +80,32 @@ fn trims_markdown_punctuation_and_unbalanced_parens() {
         vec!["https://pay.example.com/x", "https://a.example.com/p_(1)"]
     );
 }
+
+#[test]
+fn drops_image_assets() {
+    let structured = json!({
+        "a_image": "https://media-assets.swiggy.com/swiggy/image/upload/fl_lossy,f_auto,q_auto/NI_CATALOG/IMAGES/CIW/2026/6/4/x_1",
+        "b_photo": "https://cdn.example.com/products/bar_1.JPG",
+        "c_page": "https://www.swiggy.com/instamart/item/123",
+    });
+    let text = "Logo https://cdn.example.com/logo.svg?v=2 and pay at upi://pay?pa=a@b.png";
+    let links = extract_links(Some(&structured), text);
+    assert_eq!(
+        urls(&links),
+        vec![
+            "https://www.swiggy.com/instamart/item/123",
+            "upi://pay?pa=a@b.png"
+        ]
+    );
+}
+
+#[test]
+fn image_url_table() {
+    assert!(is_image_url(
+        "https://res.cloudinary.com/demo/image/upload/sample"
+    ));
+    assert!(is_image_url("https://cdn.example.com/a/b.webp"));
+    assert!(!is_image_url("https://example.com/pngs/list"));
+    assert!(!is_image_url("https://example.com/checkout"));
+    assert!(!is_image_url("not a url"));
+}

@@ -14,6 +14,10 @@ use super::types::{UiLink, UiLinkKind};
 pub const MAX_LINKS: usize = 5;
 
 const MAX_URL_LEN: usize = 2048;
+
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "bmp", "ico", "heic", "heif", "tif", "tiff",
+];
 const MAX_WALK_DEPTH: usize = 8;
 const MAX_WALK_STRINGS: usize = 512;
 
@@ -92,6 +96,9 @@ pub fn extract_links(structured: Option<&Value>, text: &str) -> Vec<UiLink> {
                 tracing::trace!("[mcp_ui] dropped a blocked link");
                 continue;
             };
+            if kind == UiLinkKind::External && is_image_url(url) {
+                continue;
+            }
             if out.iter().any(|link| link.url == url) {
                 continue;
             }
@@ -102,6 +109,20 @@ pub fn extract_links(structured: Option<&Value>, text: &str) -> Vec<UiLink> {
         }
     }
     out
+}
+
+/// Whether an `http(s)` URL points at an image asset rather than a page.
+#[must_use]
+pub fn is_image_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let path = parsed.path().to_ascii_lowercase();
+    if path.contains("/image/upload/") {
+        return true;
+    }
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| !ext.contains('/') && IMAGE_EXTENSIONS.contains(&ext))
 }
 
 fn collect_strings<'a>(value: &'a Value, depth: usize, out: &mut Vec<&'a str>) {
