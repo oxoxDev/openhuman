@@ -13,20 +13,8 @@ use crate::mcp::host::{self, McpHost};
 
 use super::resolve::is_ui_uri;
 
-const TEMPLATE_KEYS: &[&[&str]] = &[
-    &["ui", "resourceUri"],
-    &["ui/resourceUri"],
-    &["openai/outputTemplate"],
-];
-
-fn template_uri(meta: &Value) -> Option<&str> {
-    TEMPLATE_KEYS.iter().find_map(|path| {
-        let mut cursor = meta;
-        for key in *path {
-            cursor = cursor.get(*key)?;
-        }
-        cursor.as_str().filter(|uri| is_ui_uri(uri))
-    })
+fn template_uri(meta: &Value) -> Option<String> {
+    tinymcp::ui::template_from_meta(meta).map(|(uri, _)| uri)
 }
 
 fn meta_keys(meta: &Value) -> Vec<String> {

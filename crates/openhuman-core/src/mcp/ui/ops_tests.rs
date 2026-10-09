@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::mcp::ui::cache::{put_inline, InlineEntry};
-use crate::mcp::ui::types::UiCsp;
+use crate::mcp::ui::types::{UiCsp, UiToolDescriptor};
 use crate::security::AutonomyLevel;
 
 #[derive(Default)]
@@ -235,20 +235,4 @@ async fn tool_call_honours_policy_denial() {
     .unwrap_err();
     assert!(err.contains("read-only"));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn visibility_table() {
-    let with = |meta| UiToolDescriptor {
-        meta: Some(meta),
-        annotations: None,
-    };
-    assert!(visible_to_app(&UiToolDescriptor::default()));
-    assert!(visible_to_app(&with(
-        json!({"ui": {"visibility": ["model", "app"]}})
-    )));
-    assert!(!visible_to_app(&with(
-        json!({"ui": {"visibility": ["model"]}})
-    )));
-    assert!(!visible_to_app(&with(json!({"ui": {"visibility": "app"}}))));
 }

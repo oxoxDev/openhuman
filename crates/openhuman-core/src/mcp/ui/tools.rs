@@ -13,9 +13,9 @@ use serde_json::{json, Value};
 use tinytools::{PermissionLevel, Tool, ToolExposure, ToolResult};
 
 use super::cache::{self, InlineEntry};
-use super::links::extract_links;
 use super::resolve::{MAX_RESOURCE_BYTES, MAX_STRUCTURED_BYTES};
 use super::types::{McpUiPresentation, UiCsp, UiFlavor, UiResource, MCP_APP_MIME, MCP_UI_KIND};
+use tinymcp::ui::extract_links;
 
 /// The tool's registered name.
 pub const SHOW_UI_TOOL: &str = "show_ui";

@@ -18,7 +18,7 @@ use crate::security::{SecurityPolicy, ToolOperation};
 use super::cache;
 use super::port::UiServerPort;
 use super::resolve::{is_ui_uri, resource_from_contents};
-use super::types::{UiResource, UiToolDescriptor};
+use super::types::UiResource;
 
 fn require(value: Option<String>, field: &str) -> Result<String, String> {
     value
@@ -92,32 +92,6 @@ pub async fn resource_read(
     ))
 }
 
-/// Whether a widget may call this tool: absent `_meta.ui.visibility` means
-/// both the model and the app may; otherwise it must name `"app"`.
-#[must_use]
-pub fn visible_to_app(descriptor: &UiToolDescriptor) -> bool {
-    match descriptor
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.pointer("/ui/visibility"))
-    {
-        None | Some(Value::Null) => true,
-        Some(Value::Array(items)) => items.iter().any(|item| item.as_str() == Some("app")),
-        Some(_) => false,
-    }
-}
-
-/// Whether the tool declares it changes nothing.
-#[must_use]
-pub fn is_read_only(descriptor: &UiToolDescriptor) -> bool {
-    descriptor
-        .annotations
-        .as_ref()
-        .and_then(|annotations| annotations.get("readOnlyHint"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 /// A tool call a widget asked for.
 ///
 /// Answers `requires_confirmation: true` without calling when the tool is
@@ -149,7 +123,7 @@ pub async fn tool_call(
         .tool_descriptor(&server_id, &tool_name)
         .await
         .ok_or_else(|| format!("`{tool_name}` is not offered by this server"))?;
-    if !visible_to_app(&descriptor) {
+    if !tinymcp::ui::visible_to_app(descriptor.meta.as_ref()) {
         tracing::debug!(
             server_id,
             tool_name,
@@ -157,7 +131,7 @@ pub async fn tool_call(
         );
         return Err(format!("`{tool_name}` cannot be called from a widget"));
     }
-    let read_only = is_read_only(&descriptor);
+    let read_only = tinymcp::ui::is_read_only(descriptor.annotations.as_ref());
     if !read_only && !confirmed {
         tracing::debug!(
             server_id,
