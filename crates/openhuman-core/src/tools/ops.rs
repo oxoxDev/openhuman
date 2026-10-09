@@ -570,6 +570,11 @@ pub fn all_tools_with_runtime(
         tracing::debug!("[tools::ops] memory off; memory tool not registered");
     }
 
+    #[cfg(feature = "mcp")]
+    tools.push(Box::new(crate::mcp::ui::ShowUiTool::for_config(
+        root_config,
+    )));
+
     // `juice_find` / `juice_extract` / `juice_summarize`: only while a handle can name them.
     tools.extend(crate::inference::tokenjuice::repl_tools_for(root_config));
 
