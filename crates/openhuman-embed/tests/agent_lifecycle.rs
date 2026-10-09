@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::future::{Future, IntoFuture};
 use std::time::{Duration, Instant};
 
 use common::{
@@ -69,6 +70,8 @@ async fn slow_provider(delay: Duration) -> wiremock::MockServer {
     server
 }
 
+static ONE_RUNTIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn removed(result: Result<openhuman_embed::TurnOutcome, CoreError>, id: &str) {
     match result {
         Err(CoreError::AgentRemoved { agent_id, .. }) => assert_eq!(agent_id, id),
@@ -78,6 +81,7 @@ fn removed(result: Result<openhuman_embed::TurnOutcome, CoreError>, id: &str) {
 
 #[test]
 fn removing_an_agent_releases_everything_it_held() {
+    let _serial = ONE_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
     let _ = env_logger::builder().is_test(true).try_init();
     runtime().block_on(async {
         tokio::spawn(async move {
@@ -244,5 +248,61 @@ fn removing_an_agent_releases_everything_it_held() {
         })
         .await
         .expect("test task");
+    });
+}
+
+#[test]
+fn an_id_stays_reserved_until_its_removal_finishes() {
+    let _serial = ONE_RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = env_logger::builder().is_test(true).try_init();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        let backend = stub_backend().await;
+        let runtime = Runtime::builder()
+            .config(offline_config())
+            .workspace(Workspace::Ephemeral)
+            .backend_url(backend.uri())
+            .access(Access::full())
+            .build()
+            .await
+            .expect("runtime builds");
+        let slow = slow_provider(Duration::from_secs(60)).await;
+        let spec = || AgentSpec::new("racer").provider(route(&slow, "slow-model"));
+        let racer = runtime.agent(spec()).expect("racer instantiates");
+        let turn = {
+            let racer = racer.clone();
+            tokio::spawn(async move { racer.turn("take your time").send().await })
+        };
+        let mut waited = 0;
+        while common::chat_requests(&slow).await.is_empty() {
+            assert!(waited < 1000, "the slow provider never saw the turn");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            waited += 1;
+        }
+
+        let mut removal = std::pin::pin!(runtime.remove_agent("racer").into_future());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            removal.as_mut().poll(&mut cx).is_pending(),
+            "removal waits for the in-flight turn"
+        );
+
+        let refused = runtime
+            .agent(spec())
+            .expect_err("the id is reserved while removal runs");
+        assert!(
+            matches!(&refused, AgentError::DuplicateId(id) if id == "racer"),
+            "{refused:?}"
+        );
+
+        removal.await.expect("racer is removed");
+        removed(turn.await.expect("turn task"), "racer");
+        drop(racer);
+        runtime
+            .agent(spec())
+            .expect("the id is free once removal returns");
     });
 }

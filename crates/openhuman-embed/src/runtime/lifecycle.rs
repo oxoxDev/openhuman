@@ -37,6 +37,21 @@ impl<'a> IntoFuture for RemoveAgent<'a> {
     }
 }
 
+struct Reservation<'a> {
+    runtime: &'a Runtime,
+    id: String,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .removing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 impl Runtime {
     /// Remove agent `id` from this runtime.
     ///
@@ -45,7 +60,7 @@ impl Runtime {
     /// [`CoreError::AgentRemoved`](crate::CoreError::AgentRemoved); turns in
     /// flight end with the same error, waited on for up to ten seconds; its
     /// state slots and MCP host are dropped and its context deregistered, so
-    /// its cron jobs stay dormant. The id is free for reuse once this returns.
+    /// its cron jobs stay dormant. The id stays reserved until this returns, then is free for reuse.
     ///
     /// Cancellation is cooperative: a tool already executing when the agent
     /// is removed, or a sub-agent it detached, may finish after this returns.
@@ -58,13 +73,24 @@ impl Runtime {
     }
 
     async fn remove(&self, id: &str, purge: bool) -> Result<(), AgentError> {
-        let inner = {
+        let (inner, _reservation) = {
             let mut agents = self.agents.lock().unwrap_or_else(|e| e.into_inner());
             agents.retain(|_, weak| weak.strong_count() > 0);
-            agents
+            let inner = agents
                 .remove(id)
                 .and_then(|weak| weak.upgrade())
-                .ok_or_else(|| AgentError::UnknownId(id.to_string()))?
+                .ok_or_else(|| AgentError::UnknownId(id.to_string()))?;
+            self.removing
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id.to_string());
+            (
+                inner,
+                Reservation {
+                    runtime: self,
+                    id: id.to_string(),
+                },
+            )
         };
         log::debug!("[embed][runtime] removing agent id={id} purge={purge}");
         inner.deny_approvals("agent_removed");

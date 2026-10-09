@@ -82,7 +82,7 @@ pub use run::run_from_args;
 #[doc(hidden)]
 pub use summary::BuilderSummary;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, Weak};
@@ -235,6 +235,7 @@ pub struct Runtime {
     provider: Provider,
     access: Access,
     agents: Mutex<HashMap<String, Weak<AgentInner>>>,
+    removing: Mutex<HashSet<String>>,
     max_agents: usize,
 }
 
@@ -273,7 +274,13 @@ impl Runtime {
         // silently overwriting the first agent's registry entry.
         let mut agents = self.agents.lock().unwrap_or_else(|e| e.into_inner());
         agents.retain(|_, weak| weak.strong_count() > 0);
-        if agents.contains_key(&id) {
+        if agents.contains_key(&id)
+            || self
+                .removing
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&id)
+        {
             return Err(AgentError::DuplicateId(id));
         }
         if agents.len() >= self.max_agents {
@@ -453,6 +460,7 @@ impl Runtime {
             provider,
             access,
             agents: Mutex::new(HashMap::new()),
+            removing: Mutex::new(HashSet::new()),
             max_agents,
         }
     }
