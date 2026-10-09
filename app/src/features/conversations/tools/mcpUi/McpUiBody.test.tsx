@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { McpUiBody } from './McpUiBody';
 
-vi.mock('../../../../utils/tauriCommands/common', () => ({ isTauri: () => false }));
+const tauri = vi.hoisted(() => ({ value: false }));
+
+vi.mock('../../../../utils/tauriCommands/common', () => ({ isTauri: () => tauri.value }));
+vi.mock('./McpAppFrame', () => ({ McpAppFrame: () => <div data-testid="mcp-ui-frame" /> }));
 
 describe('McpUiBody', () => {
   it('renders nothing for other structured payloads', () => {
@@ -26,5 +29,27 @@ describe('McpUiBody', () => {
     );
     expect(screen.queryByTestId('mcp-ui-frame')).toBeNull();
     expect(screen.getByTestId('mcp-ui-link')).toBeInTheDocument();
+  });
+
+  it('shows only the widget when it can be sandboxed', () => {
+    tauri.value = true;
+    try {
+      render(
+        <McpUiBody
+          structured={{
+            kind: 'mcp_ui',
+            flavor: 'mcp_apps',
+            server_id: 'srv',
+            tool: 'search',
+            resource_uri: 'ui://search',
+            links: [{ url: 'https://shop.example.com/item/1', kind: 'external' }],
+          }}
+        />
+      );
+      expect(screen.getByTestId('mcp-ui-frame')).toBeInTheDocument();
+      expect(screen.queryByTestId('mcp-ui-link')).toBeNull();
+    } finally {
+      tauri.value = false;
+    }
   });
 });

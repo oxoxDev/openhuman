@@ -43,10 +43,25 @@ export interface McpUiToolCallResult {
 
 const FLAVORS: readonly McpUiFlavor[] = ['mcp_apps', 'apps_sdk', 'host_inline'];
 
+const IMAGE_PATH = /\.(?:jpe?g|png|gif|webp|avif|svg|bmp|ico|heic|heif|tiff?)$/i;
+
+/** Whether an `http(s)` URL points at an image asset rather than a page. */
+export function isImageUrl(url: string): boolean {
+  let path: string;
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return path.includes('/image/upload/') || IMAGE_PATH.test(path);
+}
+
 function isLink(value: unknown): value is McpUiLink {
   if (!value || typeof value !== 'object') return false;
   const link = value as Record<string, unknown>;
-  return typeof link.url === 'string' && (link.kind === 'external' || link.kind === 'handoff');
+  if (typeof link.url !== 'string') return false;
+  if (link.kind === 'handoff') return true;
+  return link.kind === 'external' && !isImageUrl(link.url);
 }
 
 /** Narrows a tool call's `structured` payload to a presentation. */
