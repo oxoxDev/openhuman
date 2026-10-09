@@ -108,16 +108,34 @@ function textOf(content: unknown): string {
 
 export class McpAppBridge {
   private readonly options: BridgeOptions;
+  private presentation: McpUiPresentation;
   private delivered = false;
   private initialized = false;
   private lastOpenAt = Number.NEGATIVE_INFINITY;
 
   constructor(options: BridgeOptions) {
     this.options = options;
+    this.presentation = options.presentation;
   }
 
   private get flavor() {
-    return this.options.presentation.flavor;
+    return this.presentation.flavor;
+  }
+
+  /** A newer call of the same widget; an initialized widget receives its data. */
+  updatePresentation(presentation: McpUiPresentation): void {
+    const previous = this.presentation;
+    this.presentation = presentation;
+    if (!this.initialized) return;
+    if (
+      previous.tool_input === presentation.tool_input &&
+      previous.structured_content === presentation.structured_content &&
+      previous.result_meta === presentation.result_meta
+    ) {
+      return;
+    }
+    log('sending updated tool data');
+    this.postToolData();
   }
 
   private post(message: Record<string, unknown>): void {
@@ -193,7 +211,11 @@ export class McpAppBridge {
   private sendToolData(): void {
     if (this.initialized) return;
     this.initialized = true;
-    const { presentation } = this.options;
+    this.postToolData();
+  }
+
+  private postToolData(): void {
+    const { presentation } = this;
     this.post({
       method: 'ui/notifications/tool-input',
       params: { arguments: presentation.tool_input ?? {} },

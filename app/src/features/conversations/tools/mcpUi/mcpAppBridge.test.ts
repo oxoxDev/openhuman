@@ -109,6 +109,33 @@ describe('McpAppBridge', () => {
     });
   });
 
+  it('sends newer data to an initialized widget, once per change', () => {
+    const { bridge, send, posted } = setup();
+    const base: McpUiPresentation = {
+      kind: 'mcp_ui',
+      flavor: 'mcp_apps',
+      server_id: 'srv',
+      tool: 'cart',
+      resource_uri: 'ui://cart',
+      links: [],
+    };
+    bridge.updatePresentation({ ...base, structured_content: { total: 150 } });
+    expect(posted).toHaveLength(0);
+
+    send({ jsonrpc: '2.0', method: 'ui/notifications/initialized' });
+    expect(posted.at(-1)).toMatchObject({ params: { structuredContent: { total: 150 } } });
+
+    const latest = { total: 200 };
+    bridge.updatePresentation({ ...base, structured_content: latest });
+    expect(posted.at(-1)).toMatchObject({
+      method: 'ui/notifications/tool-result',
+      params: { structuredContent: { total: 200 } },
+    });
+    const count = posted.length;
+    bridge.updatePresentation({ ...base, structured_content: latest });
+    expect(posted).toHaveLength(count);
+  });
+
   it('routes tools/call through the handler', async () => {
     const { send, posted, handlers } = setup();
     send({

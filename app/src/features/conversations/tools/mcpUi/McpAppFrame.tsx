@@ -40,7 +40,14 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
   const [pending, setPending] = useState<PendingCall | null>(null);
   const [handoffUrl, setHandoffUrl] = useState<string | null>(null);
   const decisionsRef = useRef(new Map<string, Promise<void>>());
+  const presentationRef = useRef(presentation);
+  const bridgeRef = useRef<McpAppBridge | null>(null);
   const serverId = presentation.server_id;
+
+  useEffect(() => {
+    presentationRef.current = presentation;
+    bridgeRef.current?.updatePresentation(presentation);
+  }, [presentation]);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +78,7 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
   useEffect(() => {
     if (!resource) return;
     const bridge = new McpAppBridge({
-      presentation,
+      presentation: presentationRef.current,
       html: resource.html,
       theme: currentTheme(),
       locale,
@@ -104,12 +111,16 @@ export function McpAppFrame({ presentation }: { presentation: McpUiPresentation 
         resize: next => setHeight(next),
       },
     });
+    bridgeRef.current = bridge;
     const onMessage = (event: MessageEvent) => {
       bridge.handleMessage(event);
     };
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [resource, presentation, serverId, locale]);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      if (bridgeRef.current === bridge) bridgeRef.current = null;
+    };
+  }, [resource, serverId, locale]);
 
   if (state.status === 'unavailable') {
     return (
