@@ -6,6 +6,7 @@ import {
   McpAppBridge,
   readRpcMessage,
 } from './mcpAppBridge';
+import { SCROLL_AFFORDANCE_SOURCE } from './scrollAffordance';
 import type { McpUiPresentation } from './types';
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -76,10 +77,21 @@ describe('McpAppBridge', () => {
     send({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready', params: {} });
     send({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready', params: {} });
     expect(posted).toHaveLength(1);
-    expect(posted[0]).toMatchObject({
-      method: 'ui/notifications/sandbox-resource-ready',
-      params: { html: '<html><head></head><body>cart</body></html>' },
-    });
+    expect(posted[0]).toMatchObject({ method: 'ui/notifications/sandbox-resource-ready' });
+    const html = (posted[0].params as { html: string }).html;
+    expect(html.startsWith('<html><head><script>')).toBe(true);
+    expect(html.endsWith('</head><body>cart</body></html>')).toBe(true);
+  });
+
+  it('injects the scroll affordance for both flavors, the shim only for Apps SDK', () => {
+    for (const flavor of ['mcp_apps', 'apps_sdk'] as const) {
+      const { send, posted } = setup({ flavor });
+      send({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready' });
+      const html = (posted[0].params as { html: string }).html;
+      expect(html).toContain(SCROLL_AFFORDANCE_SOURCE.slice(0, 40));
+      expect(html.includes('window.openai')).toBe(flavor === 'apps_sdk');
+      expect(html.lastIndexOf('</script>')).toBeLessThan(html.indexOf('cart'));
+    }
   });
 
   it('injects the Apps SDK shim for Apps SDK widgets', () => {

@@ -11,6 +11,7 @@ import debug from 'debug';
 
 import { classifyHref } from '../../utils/format';
 import { APPS_SDK_SHIM_SOURCE, injectScript } from './appsSdkShim';
+import { SCROLL_AFFORDANCE_SOURCE } from './scrollAffordance';
 import type { McpUiPresentation } from './types';
 
 const log = debug('mcp-ui:bridge');
@@ -200,10 +201,11 @@ export class McpAppBridge {
   private deliverDocument(): void {
     if (this.delivered) return;
     this.delivered = true;
+    const withAffordance = injectScript(this.options.html, SCROLL_AFFORDANCE_SOURCE);
     const html =
       this.flavor === 'apps_sdk'
-        ? injectScript(this.options.html, APPS_SDK_SHIM_SOURCE)
-        : this.options.html;
+        ? injectScript(withAffordance, APPS_SDK_SHIM_SOURCE)
+        : withAffordance;
     log('delivering widget document (%s)', this.flavor);
     this.post({ method: 'ui/notifications/sandbox-resource-ready', params: { html } });
   }
