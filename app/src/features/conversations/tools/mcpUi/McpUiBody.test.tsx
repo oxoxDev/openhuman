@@ -6,7 +6,6 @@ import { McpUiBody } from './McpUiBody';
 const tauri = vi.hoisted(() => ({ value: false }));
 
 vi.mock('../../../../utils/tauriCommands/common', () => ({ isTauri: () => tauri.value }));
-vi.mock('./McpAppFrame', () => ({ McpAppFrame: () => <div data-testid="mcp-ui-frame" /> }));
 
 describe('McpUiBody', () => {
   it('renders nothing for other structured payloads', () => {
@@ -31,7 +30,7 @@ describe('McpUiBody', () => {
     expect(screen.getByTestId('mcp-ui-link')).toBeInTheDocument();
   });
 
-  it('shows only the widget when it can be sandboxed', () => {
+  it('leaves a sandboxable widget to the message strip', () => {
     tauri.value = true;
     try {
       render(
@@ -46,8 +45,8 @@ describe('McpUiBody', () => {
           }}
         />
       );
-      expect(screen.getByTestId('mcp-ui-frame')).toBeInTheDocument();
-      expect(screen.queryByTestId('mcp-ui-link')).toBeNull();
+      expect(screen.queryByTestId('mcp-ui-body')).toBeNull();
+      expect(screen.queryByTestId('mcp-ui-frame')).toBeNull();
     } finally {
       tauri.value = false;
     }

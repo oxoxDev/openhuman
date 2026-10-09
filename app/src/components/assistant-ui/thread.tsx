@@ -31,6 +31,8 @@ import {
   useAuiReloadCapability,
 } from '@/features/conversations/components/aui/auiThreadState';
 import { onComposerPrefill } from '@/features/conversations/tools/mcpUi/composerPrefill';
+import { McpWidgetStrip } from '@/features/conversations/tools/mcpUi/McpWidgetStrip';
+import { collectMessageWidgets } from '@/features/conversations/tools/mcpUi/messageWidgets';
 import { useT } from '@/lib/i18n/I18nContext';
 import { useAuiThreadId } from '@/providers/AssistantUiRuntimeProvider';
 import { CHAT_ERROR_METADATA_KEY } from '@/store/threadSlice';
@@ -1560,6 +1562,8 @@ const AssistantMessage: FC = () => {
     SourceGroup,
   } = useContext(ThreadComponentsContext);
   const stopped = useAuiState(isStoppedRun);
+  const parts = useAuiState(s => s.message.parts);
+  const widgets = useMemo(() => collectMessageWidgets(parts), [parts]);
 
   const ACTION_BAR_PT = 'pt-1.5';
   // `min-h` reserves the bar's height (`pt-1.5` + a `size-6` button = 7.5) so a
@@ -1614,8 +1618,17 @@ const AssistantMessage: FC = () => {
           })}>
           {({ part, children }) => {
             switch (part.type) {
-              case 'group-activity':
-                return <ActivityGroup group={part}>{children}</ActivityGroup>;
+              case 'group-activity': {
+                const groupWidgets = widgets.filter(widget =>
+                  part.indices.includes(widget.partIndex)
+                );
+                return (
+                  <>
+                    <ActivityGroup group={part}>{children}</ActivityGroup>
+                    <McpWidgetStrip widgets={groupWidgets} />
+                  </>
+                );
+              }
               case 'group-source':
                 return SourceGroup ? <SourceGroupSlot Component={SourceGroup} /> : null;
               case 'text':
