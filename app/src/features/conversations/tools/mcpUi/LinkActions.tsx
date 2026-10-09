@@ -28,7 +28,7 @@ export function QrHandoff({ url, hint }: { url: string; hint: string }) {
   return (
     <div className="flex flex-col items-center gap-2" data-testid="mcp-ui-qr">
       <p className="text-xs text-content-muted text-center">{hint}</p>
-      <div className="rounded-lg bg-white p-2 border border-line">
+      <div className="rounded-lg p-2 border border-line" style={{ backgroundColor: '#ffffff' }}>
         <QRCodeSVG value={url} size={168} level="M" bgColor="#ffffff" fgColor="#1c1917" />
       </div>
       <span className="max-w-[220px] break-all text-center font-mono text-[11px] text-content-secondary">
