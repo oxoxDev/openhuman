@@ -730,3 +730,28 @@ async fn learning_is_durably_queued_even_when_the_backend_refuses_writes() {
     assert_eq!(value["status"], "queued; not yet saved to memory");
     assert_eq!(super::super::tool_writes::drain(&config).await, 0);
 }
+
+#[tokio::test]
+async fn learn_under_a_bound_dispatch_context_is_stored() {
+    use crate::core::runtime::{CoreContext, DomainSet};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config_in(&tmp);
+    let engine = bind_reference(&config);
+    let dispatch = DispatchCtx::new(CoreContext::for_test(DomainSet::full(), None));
+
+    let args = json!({"action": "learn", "text": "The user keeps a dispatch-bound fact"});
+    let result = run_action(&dispatch, &config, &args, &facts()).await;
+    assert!(!result.is_error, "{}", text(&result));
+
+    let items = stored(
+        &engine,
+        MetaFilter {
+            kinds: vec![ItemKind::Learning],
+            ..MetaFilter::default()
+        },
+    )
+    .await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].text, "The user keeps a dispatch-bound fact");
+}
